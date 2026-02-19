@@ -13,7 +13,7 @@ WINDOW_SIZE = 15
 STEP_SIZE_HUMAN = 10
 STEP_SIZE_BOT = 1
 NUM_REFERENCES = 50
-SYNTHETIC_SAMPLES = 2000   # For the train split; val/test get proportional counts
+SYNTHETIC_SAMPLES = 4000   # For the train split; val/test get proportional counts
 
 # Person-based split ratios
 TRAIN_RATIO = 0.70
