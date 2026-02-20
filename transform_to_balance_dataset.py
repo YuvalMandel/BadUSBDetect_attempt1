@@ -27,7 +27,7 @@ def main():
     # Balance: trim humans to match bot count so the classifier isn't biased
     target = n_bots
     if len(df_humans) > target:
-        print(f"\nTrimming humans: {len(df_humans)} → {target} (to match bot count)")
+        print(f"\nTrimming humans: {len(df_humans)} -> {target} (to match bot count)")
         df_humans_cut = df_humans.iloc[:target]
     else:
         print(f"\nHumans ({len(df_humans)}) ≤ bots ({n_bots}), keeping all humans.")

@@ -232,28 +232,139 @@ def create_reference_pool(train_human_files):
 # ==============================================================================
 
 def generate_synthetic_bots(n_samples):
+    """
+    Generates n_samples synthetic BadUSB attack windows.
+
+    Attack taxonomy:
+      ─ Original 4: machine_gun, gaussian, uniform, jitter
+      ─ New 9:      constant, exponential, log_normal, bimodal,
+                    very_fast, burst_pause, linear_ramp, pareto, sinusoidal
+    """
     synthetic_rows = []
-    attack_types = ['machine_gun', 'gaussian', 'uniform', 'jitter']
+    attack_types = [
+        # --- original ---
+        'machine_gun', 'gaussian', 'uniform', 'jitter',
+        # --- new ---
+        'constant',      # exact sleep(n) — near-zero variance
+        'exponential',   # memoryless Poisson-process inter-arrivals
+        'log_normal',    # right-skewed, typical of automated systems
+        'bimodal',       # two-speed bot (fast actions + deliberate pauses)
+        'very_fast',     # sub-millisecond turbo typing
+        'burst_pause',   # rapid key bursts separated by macro pauses
+        'linear_ramp',   # timing increases linearly (CPU throttle / ramp)
+        'pareto',        # heavy-tailed: mostly fast, rare very long gaps
+        'sinusoidal',    # periodic cycle — keyboard macro heartbeat
+    ]
 
     for _ in range(n_samples):
         attack_type = random.choice(attack_types)
-        win_dwell, win_flight = None, None
+        win_dwell = win_flight = None
 
+        # ---- original distributions ----
         if attack_type == 'machine_gun':
             val = random.randint(4, 10)
             win_dwell  = np.full(WINDOW_SIZE, val) + np.random.normal(0, 0.1, WINDOW_SIZE)
             win_flight = np.full(WINDOW_SIZE, val) + np.random.normal(0, 0.1, WINDOW_SIZE)
+
         elif attack_type == 'gaussian':
-            mean, std = random.randint(80, 150), random.randint(10, 40)
+            mean = random.randint(80, 150)
+            std  = random.randint(10, 40)
             win_dwell  = np.random.normal(mean, std, WINDOW_SIZE)
             win_flight = np.random.normal(mean, std, WINDOW_SIZE)
+
         elif attack_type == 'uniform':
-            low, high = random.randint(10, 50), random.randint(60, 200)
+            low  = random.randint(10, 50)
+            high = random.randint(60, 200)
             win_dwell  = np.random.uniform(low, high, WINDOW_SIZE)
             win_flight = np.random.uniform(low, high, WINDOW_SIZE)
+
         elif attack_type == 'jitter':
             win_dwell  = np.random.randint(5, 300, WINDOW_SIZE).astype(float)
             win_flight = np.random.randint(5, 300, WINDOW_SIZE).astype(float)
+
+        # ---- new distributions ----
+        elif attack_type == 'constant':
+            # Precise scripted delay — extremely low variance
+            val = random.uniform(20.0, 500.0)
+            win_dwell  = np.full(WINDOW_SIZE, val) + np.random.normal(0, 0.05, WINDOW_SIZE)
+            win_flight = np.full(WINDOW_SIZE, val) + np.random.normal(0, 0.05, WINDOW_SIZE)
+
+        elif attack_type == 'exponential':
+            # Memoryless Poisson-process inter-arrivals
+            scale = random.uniform(20.0, 200.0)   # mean timing in ms
+            win_dwell  = np.random.exponential(scale, WINDOW_SIZE)
+            win_flight = np.random.exponential(scale, WINDOW_SIZE)
+
+        elif attack_type == 'log_normal':
+            # Right-skewed — common in timer-driven automation
+            mu    = random.uniform(3.0, 5.5)    # log-scale mean (≈20–250 ms)
+            sigma = random.uniform(0.1, 0.6)
+            win_dwell  = np.random.lognormal(mu, sigma, WINDOW_SIZE)
+            win_flight = np.random.lognormal(mu, sigma, WINDOW_SIZE)
+
+        elif attack_type == 'bimodal':
+            # Two-speed bot: quick taps mixed with deliberate pauses
+            mu1, std1 = random.randint(5, 30),   random.randint(1, 5)
+            mu2, std2 = random.randint(100, 300), random.randint(10, 50)
+            n1 = WINDOW_SIZE // 2
+            n2 = WINDOW_SIZE - n1
+            combined = np.concatenate([
+                np.random.normal(mu1, std1, n1),
+                np.random.normal(mu2, std2, n2),
+            ])
+            np.random.shuffle(combined)
+            win_dwell  = combined.copy()
+            win_flight = combined + np.random.normal(0, 2.0, WINDOW_SIZE)
+
+        elif attack_type == 'very_fast':
+            # Sub-millisecond / near-instantaneous keystrokes
+            win_dwell  = np.random.uniform(0.3, 5.0, WINDOW_SIZE)
+            win_flight = np.random.uniform(0.3, 5.0, WINDOW_SIZE)
+
+        elif attack_type == 'burst_pause':
+            # N rapid keystrokes followed by one macro pause, repeating
+            burst_len = random.randint(3, 8)
+            burst_val = random.uniform(5.0, 20.0)
+            pause_val = random.uniform(200.0, 800.0)
+            pattern = []
+            i = 0
+            while len(pattern) < WINDOW_SIZE:
+                if i % (burst_len + 1) == burst_len:
+                    pattern.append(pause_val + np.random.normal(0, 10))
+                else:
+                    pattern.append(burst_val + np.random.normal(0, 1))
+                i += 1
+            arr = np.array(pattern[:WINDOW_SIZE])
+            win_dwell  = arr.copy()
+            win_flight = arr + np.random.normal(0, 2.0, WINDOW_SIZE)
+
+        elif attack_type == 'linear_ramp':
+            # Timing increases (or decreases) linearly — CPU throttling / warm-up
+            start = random.uniform(5.0,  50.0)
+            end   = random.uniform(100.0, 500.0)
+            if random.random() < 0.5:
+                start, end = end, start   # random direction
+            noise = random.uniform(1.0, 10.0)
+            base = np.linspace(start, end, WINDOW_SIZE)
+            win_dwell  = base + np.random.normal(0, noise, WINDOW_SIZE)
+            win_flight = base + np.random.normal(0, noise, WINDOW_SIZE)
+
+        elif attack_type == 'pareto':
+            # Heavy-tailed: fast most of the time, rare extreme delays
+            alpha = random.uniform(1.5, 3.0)   # shape (lower → heavier tail)
+            scale = random.uniform(10.0, 50.0)  # minimum value
+            win_dwell  = (np.random.pareto(alpha, WINDOW_SIZE) + 1.0) * scale
+            win_flight = (np.random.pareto(alpha, WINDOW_SIZE) + 1.0) * scale
+
+        elif attack_type == 'sinusoidal':
+            # Periodic oscillation — keyboard macro with fixed cycle
+            base_val  = random.uniform(50.0, 200.0)
+            amplitude = random.uniform(10.0, 80.0)
+            period    = random.uniform(4.0, 14.0)   # keystrokes per cycle
+            t = np.arange(WINDOW_SIZE, dtype=float)
+            wave = base_val + amplitude * np.sin(2.0 * np.pi * t / period)
+            win_dwell  = wave + np.random.normal(0, 2.0, WINDOW_SIZE)
+            win_flight = wave + np.random.normal(0, 2.0, WINDOW_SIZE)
 
         if win_dwell is not None:
             synthetic_rows.append((np.abs(win_dwell), np.abs(win_flight)))
@@ -358,7 +469,7 @@ def main():
     n_synth_test  = int(SYNTHETIC_SAMPLES * (1 - TRAIN_RATIO - VAL_RATIO) / TRAIN_RATIO)
 
     # ---- 6. Process each split and save ----
-    COLS = ["F_Mean", "F_Med", "F_Std", "F_Skew", "F_Kurt", "F_MinKS", "F_MinW",
+    cols = ["F_Mean", "F_Med", "F_Std", "F_Skew", "F_Kurt", "F_MinKS", "F_MinW",
             "D_Mean", "D_Med", "D_Std", "D_Skew", "D_Kurt", "D_MinKS", "D_MinW", "Label"]
 
     splits = [
@@ -375,14 +486,14 @@ def main():
         rows = process_split(human_files, bot_files, ref_dwells, ref_flights,
                              n_synth, split_name)
 
-        df = pd.DataFrame(rows, columns=COLS)
+        df = pd.DataFrame(rows, columns=cols)
         df = df.sample(frac=1, random_state=RANDOM_SEED).reset_index(drop=True)
         df.to_csv(output_file, index=False)
 
         print(f"\nSaved: {output_file}  ({len(df)} rows)")
         print(df["Label"].value_counts().to_string())
 
-    print("\n✅ All splits saved.")
+    print("\nAll splits saved.")
 
 
 if __name__ == "__main__":
