@@ -8,10 +8,11 @@ WhatsApp Image*.jpeg
 .claude/
 build_htm.py
 build_htm_manual.py
-features_cache.pkl
+*.pkl
 install_htm.bat
 install_htm.ps1
 install_htm_err.txt
 install_htm_log.txt
 install_htm_logged.bat
 run_training.sh
+*.png
