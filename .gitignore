@@ -16,3 +16,10 @@ install_htm_log.txt
 install_htm_logged.bat
 run_training.sh
 *.png
+
+# HTM hyperparameter search outputs (binary / generated)
+models/
+plots/
+logs/
+results/
+# configs/ is intentionally NOT ignored — JSON configs are versioned
