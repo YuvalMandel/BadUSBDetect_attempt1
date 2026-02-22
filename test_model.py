@@ -21,6 +21,12 @@ except ImportError:
     print("HTM libraries not found. Please install htm.core.")
     sys.exit(1)
 
+# ------------------------------------------------------------------
+# Paths
+# ------------------------------------------------------------------
+PLOTS_DIR = "plots"
+os.makedirs(PLOTS_DIR, exist_ok=True)
+
 
 def load_model(model_path):
     print(f"Loading model from {model_path}...")
@@ -29,7 +35,12 @@ def load_model(model_path):
     return model_data
 
 
-def run_inference(model_data, file_features, file_list, is_bot, desc="Inference"):
+def run_inference(model_data, file_features, file_list, is_bot, desc="Inference",
+                  collect_seqs=False):
+    """
+    If collect_seqs=True, also return the raw anomaly sequences per file
+    (for plotting anomaly-over-time).
+    """
     sp = model_data['sp']
     tm = model_data['tm']
     encoder = model_data['encoder']
@@ -40,6 +51,7 @@ def run_inference(model_data, file_features, file_list, is_bot, desc="Inference"
 
     scores = []
     labels = []
+    seqs = []
 
     print(f"Running {desc} on {len(file_list)} files...")
 
@@ -70,8 +82,85 @@ def run_inference(model_data, file_features, file_list, is_bot, desc="Inference"
             valid_scores = file_scores[5:] if len(file_scores) > 5 else file_scores
             scores.append(np.mean(valid_scores))
             labels.append(1 if is_bot else 0)
+            if collect_seqs:
+                seqs.append(file_scores)
 
-    return scores, labels
+    if collect_seqs:
+        return scores, labels, seqs
+    else:
+        return scores, labels
+
+
+# ------------------------------------------------------------------
+# Plots
+# ------------------------------------------------------------------
+def plot_results(val_h_seqs, val_b_seqs,
+                 all_val_scores, all_val_labels,
+                 val_h_scores, val_b_scores,
+                 best_thresh, val_f1,
+                 fname_slug, title_prefix=""):
+    """
+    Reproduces the 3-panel plot:
+      1) anomaly score over time for sample human/bot files
+      2) per-file mean score distribution + threshold
+      3) F1 vs threshold curve, with best threshold marked
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    title = f"{title_prefix} Val F1={val_f1:.4f}"
+    fig.suptitle(title, fontsize=7)
+
+    # Panel 1 — anomaly score over time
+    ax = axes[0]
+    n = min(3, len(val_h_seqs), len(val_b_seqs))
+    for i in range(n):
+        ax.plot(val_h_seqs[i], alpha=0.7, color='steelblue',
+                label='Human' if i == 0 else '_nolegend_')
+    for i in range(n):
+        ax.plot(val_b_seqs[i], alpha=0.7, color='tomato',
+                label='Bot' if i == 0 else '_nolegend_')
+    ax.set_title('Anomaly Score Over Time\n(sample files)')
+    ax.set_xlabel('Window index')
+    ax.set_ylabel('Anomaly score')
+    ax.set_ylim(0, 1.05)
+    ax.legend()
+    ax.grid(True)
+
+    # Panel 2 — per-file mean score distribution
+    ax = axes[1]
+    ax.hist(val_h_scores, bins=15, alpha=0.65, color='steelblue', label='Human')
+    ax.hist(val_b_scores, bins=15, alpha=0.65, color='tomato', label='Bot')
+    ax.axvline(best_thresh, color='green', linestyle='--', linewidth=2,
+               label=f'Thresh={best_thresh:.3f}')
+    ax.set_title('Per-File Mean Anomaly Score')
+    ax.set_xlabel('Mean anomaly score')
+    ax.set_ylabel('Count')
+    ax.legend()
+    ax.grid(True)
+
+    # Panel 3 — F1 vs threshold
+    ax = axes[2]
+    ths = np.linspace(0, 1, 200)
+    f1s = [
+        f1_score(all_val_labels,
+                 [1 if s >= t else 0 for s in all_val_scores],
+                 zero_division=0)
+        for t in ths
+    ]
+    ax.plot(ths, f1s, color='blue', linewidth=2, label='Val F1')
+    ax.axvline(best_thresh, color='red', linestyle='--', linewidth=2,
+               label=f'Best={best_thresh:.3f} (F1={val_f1:.4f})')
+    ax.set_title('F1 Score vs Threshold')
+    ax.set_xlabel('Threshold')
+    ax.set_ylabel('F1 score')
+    ax.set_ylim(0, 1.05)
+    ax.legend()
+    ax.grid(True)
+
+    plt.tight_layout()
+    fpath = os.path.join(PLOTS_DIR, f"{fname_slug}_results.png")
+    plt.savefig(fpath, dpi=120, bbox_inches='tight')
+    plt.close()
+    print(f"  Plot  → {fpath}")
 
 
 def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
@@ -97,7 +186,7 @@ def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
         plt.xticks([0.5, 1.5], ['Human', 'Bot'])
         plt.yticks([0.5, 1.5], ['Human', 'Bot'])
         plt.tight_layout()
-        plot_path = f"{plot_prefix}_{subset_name.replace(' ', '_').lower()}_confusion.png"
+        plot_path = os.path.join(PLOTS_DIR, f"{plot_prefix}_{subset_name.replace(' ', '_').lower()}_confusion.png")
         plt.savefig(plot_path)
         plt.close()
         print(f"{subset_name} confusion plot saved to {plot_path}")
@@ -165,6 +254,9 @@ def main():
     best_thresh = model_data.get('best_thresh', 0.5)
     print(f"Model loaded. Using threshold: {best_thresh:.4f}")
 
+    # Model-based slug for plots
+    base_model_name = os.path.splitext(os.path.basename(args.model))[0]
+
     # Original splits
     train_human = split.get('train_human', [])
     val_human = split.get('val_human', [])
@@ -174,12 +266,14 @@ def main():
 
     # ORIG MODE: behave as before (optionally skip printing/orig plots)
     if args.mode == "orig" and not args.skip_orig_sets:
-        # Validation Set
-        val_h_scores, val_h_labels = run_inference(
-            model_data, features_cache, val_human, False, "Validation (Human)"
+        # Validation Set (collect sequences for the 3-panel plot)
+        val_h_scores, val_h_labels, val_h_seqs = run_inference(
+            model_data, features_cache, val_human, False,
+            "Validation (Human)", collect_seqs=True
         )
-        val_b_scores, val_b_labels = run_inference(
-            model_data, features_cache, val_bots, True, "Validation (Bot)"
+        val_b_scores, val_b_labels, val_b_seqs = run_inference(
+            model_data, features_cache, val_bots, True,
+            "Validation (Bot)", collect_seqs=True
         )
 
         all_val_scores = val_h_scores + val_b_scores
@@ -210,6 +304,16 @@ def main():
             subset_name="Test", do_plot=False
         )
 
+        # 3-panel results plot (using validation data)
+        plot_results(
+            val_h_seqs, val_b_seqs,
+            all_val_scores, all_val_labels,
+            val_h_scores, val_b_scores,
+            best_thresh, val_f1,
+            fname_slug=f"{base_model_name}_orig",
+            title_prefix=f"{base_model_name} (orig)"
+        )
+
         # Combined confusion matrices plot (like original script)
         print("Generating combined confusion matrices plot...")
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -231,7 +335,7 @@ def main():
         axes[1].set_yticklabels(['Human', 'Bot'])
 
         plt.tight_layout()
-        orig_plot_path = "test_model_confusion_orig_splits.png"
+        orig_plot_path = os.path.join(PLOTS_DIR, f"{base_model_name}_orig_confusion.png")
         plt.savefig(orig_plot_path)
         plt.close()
         print(f"Original splits confusion plot saved to {orig_plot_path}")
@@ -242,16 +346,9 @@ def main():
         print("Evaluating ALL NON-TRAIN FILES")
         print("=" * 40)
 
-        # Build sets of human/bot files not in train_human
-        # Assumes that all keys in features_cache are either human or bot
-        # according to presence in original splits.
         train_human_set = set(train_human)
-
-        # Start with everything in features_cache.
         all_files = list(features_cache.keys())
 
-        # Determine human/bot label from split lists when possible.
-        # Anything not in any of these lists will be skipped (or you can default).
         known_human = set(train_human) | set(val_human) | set(test_human)
         known_bot = set(val_bots) | set(test_bots)
 
@@ -267,23 +364,33 @@ def main():
         print(f"Non-train human files: {len(non_train_human_files)}")
         print(f"Non-train bot files:   {len(non_train_bot_files)}")
 
-        # Run inference
-        nt_h_scores, nt_h_labels = run_inference(
+        # Collect sequences here as well so we can reuse the same 3-panel plot
+        nt_h_scores, nt_h_labels, nt_h_seqs = run_inference(
             model_data, features_cache, non_train_human_files, False,
-            "All Non-Train (Human)"
+            "All Non-Train (Human)", collect_seqs=True
         )
-        nt_b_scores, nt_b_labels = run_inference(
+        nt_b_scores, nt_b_labels, nt_b_seqs = run_inference(
             model_data, features_cache, non_train_bot_files, True,
-            "All Non-Train (Bot)"
+            "All Non-Train (Bot)", collect_seqs=True
         )
 
         all_nt_scores = nt_h_scores + nt_b_scores
         all_nt_labels = nt_h_labels + nt_b_labels
 
-        eval_and_report(
+        nt_f1 = eval_and_report(
             all_nt_scores, all_nt_labels, best_thresh,
             subset_name="All Non-Train", do_plot=True,
-            plot_prefix="all_non_train"
+            plot_prefix=f"{base_model_name}_all_non_train"
+        )
+
+        # 3-panel results plot for all non-train
+        plot_results(
+            nt_h_seqs, nt_b_seqs,
+            all_nt_scores, all_nt_labels,
+            nt_h_scores, nt_b_scores,
+            best_thresh, nt_f1,
+            fname_slug=f"{base_model_name}_all_non_train",
+            title_prefix=f"{base_model_name} (all_non_train)"
         )
 
     if args.mode == "orig" and args.skip_orig_sets:
