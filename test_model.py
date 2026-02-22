@@ -7,6 +7,21 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 
+import glob
+from scipy import stats
+import warnings
+import random
+
+warnings.filterwarnings('ignore')
+
+# Match training constants
+WINDOW_SIZE = 15
+STEP_SIZE_HUMAN = 1
+STEP_SIZE_BOT = 1
+NUM_REFERENCES = 50
+RANDOM_SEED = 42
+
+
 # Ensure htm_common is available
 try:
     import htm_common
@@ -27,6 +42,104 @@ except ImportError:
 PLOTS_DIR = "plots"
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
+def parse_file(filepath):
+    dwells = []
+    flights = []
+    active_keys = {}
+    last_keyup = None
+
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except Exception:
+        return np.array([]), np.array([])
+
+    for line in lines:
+        parts = line.strip().split()
+        if len(parts) < 3:
+            continue
+        key, action = parts[0], parts[1]
+        try:
+            ts = int(parts[2])
+        except ValueError:
+            continue
+
+        scale = 10000.0 if ts > 10**15 else 1.0
+
+        if action == "KeyDown":
+            active_keys[key] = ts
+            if last_keyup is not None:
+                delta = (ts - last_keyup) / scale
+                if 0 < delta < 5000:
+                    flights.append(delta)
+        elif action == "KeyUp":
+            last_keyup = ts
+            if key in active_keys:
+                down_ts = active_keys.pop(key)
+                delta = (ts - down_ts) / scale
+                if 0 < delta < 3000:
+                    dwells.append(delta)
+
+    return np.array(dwells), np.array(flights)
+
+
+def extract_features(window_data, reference_pool):
+    if len(window_data) < WINDOW_SIZE:
+        return None
+    if np.isnan(window_data).any():
+        return None
+
+    feat_mean = np.mean(window_data)
+    feat_med  = np.median(window_data)
+    feat_std  = np.std(window_data)
+
+    if feat_std < 0.0001:
+        feat_skew, feat_kurt = 0, 10
+    else:
+        feat_skew = stats.skew(window_data)
+        feat_kurt = stats.kurtosis(window_data)
+
+    ks_scores, w_scores = [], []
+    for ref_win in reference_pool:
+        ks, _ = stats.ks_2samp(window_data, ref_win)
+        ks_scores.append(ks)
+        w_scores.append(stats.wasserstein_distance(window_data, ref_win))
+
+    return [feat_mean, feat_med, feat_std, feat_skew, feat_kurt,
+            np.min(ks_scores), np.min(w_scores)]
+
+
+def create_reference_pool(train_human_files):
+    """Rebuild the reference pools exactly like training, using train_human paths from split.pkl."""
+    print("--- Collecting Reference Pool (train humans only) ---")
+    all_human_dwells  = []
+    all_human_flights = []
+
+    sample_files = list(train_human_files)
+    random.shuffle(sample_files)
+
+    for filepath in sample_files[:50]:
+        d, fl = parse_file(filepath)
+        if len(d)  >= WINDOW_SIZE: all_human_dwells.extend(d)
+        if len(fl) >= WINDOW_SIZE: all_human_flights.extend(fl)
+
+    ref_dwells, ref_flights = [], []
+
+    if len(all_human_dwells) > WINDOW_SIZE:
+        for _ in range(NUM_REFERENCES):
+            max_start = len(all_human_dwells) - WINDOW_SIZE
+            start = random.randint(0, max_start)
+            ref_dwells.append(np.array(all_human_dwells[start: start + WINDOW_SIZE]))
+
+    if len(all_human_flights) > WINDOW_SIZE:
+        for _ in range(NUM_REFERENCES):
+            max_start = len(all_human_flights) - WINDOW_SIZE
+            start = random.randint(0, max_start)
+            ref_flights.append(np.array(all_human_flights[start: start + WINDOW_SIZE]))
+
+    return ref_dwells, ref_flights
+
+
 
 def load_model(model_path):
     print(f"Loading model from {model_path}...")
@@ -34,6 +147,30 @@ def load_model(model_path):
         model_data = pickle.load(f)
     return model_data
 
+def compute_features_for_raw_file(filepath, ref_dwells, ref_flights, step_size):
+    """
+    Parse a raw keystroke .txt file and compute the same feature sequences
+    used during training (dwells + flights windows).
+    Returns np.array of shape [num_windows, feature_dim] or empty array.
+    """
+    d, f = parse_file(filepath)
+    min_len = min(len(d), len(f))
+
+    features_seq = []
+    if min_len < WINDOW_SIZE:
+        return np.array([])
+
+    for i in range(0, min_len - WINDOW_SIZE, step_size):
+        w_d = d[i: i + WINDOW_SIZE]
+        w_f = f[i: i + WINDOW_SIZE]
+
+        ft_d = extract_features(w_d, ref_dwells)
+        ft_f = extract_features(w_f, ref_flights)
+
+        if ft_d and ft_f:
+            features_seq.append(ft_f + ft_d)
+
+    return np.array(features_seq)
 
 def run_inference(model_data, file_features, file_list, is_bot, desc="Inference",
                   collect_seqs=False):
@@ -100,7 +237,7 @@ def plot_results(val_h_seqs, val_b_seqs,
                  best_thresh, val_f1,
                  fname_slug, title_prefix=""):
     """
-    Reproduces the 3-panel plot:
+    3-panel plot:
       1) anomaly score over time for sample human/bot files
       2) per-file mean score distribution + threshold
       3) F1 vs threshold curve, with best threshold marked
@@ -193,10 +330,73 @@ def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
 
     return f1
 
+def validate_txt_file(path, min_cols=1):
+    """
+    Basic sanity check for a .txt file.
+    - Tries to read lines.
+    - Splits on whitespace or comma.
+    - Ensures at least one non-empty line.
+    - Ensures all non-empty lines have the same number of numeric columns.
+    Returns True if the file 'makes sense', False otherwise.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            first_cols = None
+            any_valid = False
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                # Split on comma first, fallback to whitespace
+                if "," in line:
+                    parts = [p.strip() for p in line.split(",")]
+                else:
+                    parts = line.split()
+
+                # Try to parse as floats
+                vals = []
+                for p in parts:
+                    if not p:
+                        continue
+                    try:
+                        vals.append(float(p))
+                    except ValueError:
+                        # Not numeric, reject file
+                        return False
+
+                if not vals:
+                    continue
+
+                if first_cols is None:
+                    first_cols = len(vals)
+                    if first_cols < min_cols:
+                        return False
+                else:
+                    if len(vals) != first_cols:
+                        return False
+
+                any_valid = True
+
+            return bool(any_valid)
+    except Exception as e:
+        print(f"Warning: failed to read/validate {path}: {e}")
+        return False
+
+
+def list_all_files_recursive(root_dir):
+    """Return a list of all files under root_dir (recursive)."""
+    paths = []
+    for r, _, files in os.walk(root_dir):
+        for fname in files:
+            # print(fname)
+            full = os.path.join(r, fname)
+            paths.append(os.path.abspath(full))
+    return paths
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test a trained HTM model on Test/Val sets or all non-train files."
+        description="Test a trained HTM model on Test/Val sets, all non-train, or other files."
     )
     parser.add_argument(
         "--model",
@@ -215,18 +415,26 @@ def main():
     )
     parser.add_argument(
         "--mode",
-        choices=["orig", "all_non_train"],
-        default="all_non_train",
+        choices=["orig", "all_non_train", "all_other_files"],
+        default="all_other_files",
         help=(
             "Evaluation mode: "
-            "'orig' uses original val/test splits (default). "
-            "'all_non_train' evaluates on all files that are not in the original train set."
+            "'orig' uses original val/test splits. "
+            "'all_non_train' evaluates all files not in the original train set "
+            "(using split/feature keys). "
+            "'all_other_files' walks the filesystem under --data_root, then "
+            "filters out any files that are part of the original train/val/test sets."
         )
+    )
+    parser.add_argument(
+        "--data_root",
+        default="../UB_keystroke_dataset/",
+        help="Root directory to search for 'other' files when mode=all_other_files."
     )
     parser.add_argument(
         "--skip_orig_sets",
         action="store_true",
-        help="If set, skip evaluation and plots for original val/test sets."
+        help="If set, skip evaluation and plots for original val/test sets (only relevant for mode=orig)."
     )
 
     args = parser.parse_args()
@@ -257,7 +465,7 @@ def main():
     # Model-based slug for plots
     base_model_name = os.path.splitext(os.path.basename(args.model))[0]
 
-    # Original splits
+    # Original splits (paths as stored in split/features_cache)
     train_human = split.get('train_human', [])
     val_human = split.get('val_human', [])
     test_human = split.get('test_human', [])
@@ -314,7 +522,7 @@ def main():
             title_prefix=f"{base_model_name} (orig)"
         )
 
-        # Combined confusion matrices plot (like original script)
+        # Combined confusion matrices plot
         print("Generating combined confusion matrices plot...")
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
@@ -340,10 +548,10 @@ def main():
         plt.close()
         print(f"Original splits confusion plot saved to {orig_plot_path}")
 
-    # ALL_NON_TRAIN MODE: evaluate all files not in train set
+    # ALL_NON_TRAIN MODE: evaluate all files not in train set (using split/feature keys)
     if args.mode == "all_non_train":
         print("\n" + "=" * 40)
-        print("Evaluating ALL NON-TRAIN FILES")
+        print("Evaluating ALL NON-TRAIN FILES (based on split/features_cache)")
         print("=" * 40)
 
         train_human_set = set(train_human)
@@ -364,7 +572,6 @@ def main():
         print(f"Non-train human files: {len(non_train_human_files)}")
         print(f"Non-train bot files:   {len(non_train_bot_files)}")
 
-        # Collect sequences here as well so we can reuse the same 3-panel plot
         nt_h_scores, nt_h_labels, nt_h_seqs = run_inference(
             model_data, features_cache, non_train_human_files, False,
             "All Non-Train (Human)", collect_seqs=True
@@ -383,7 +590,6 @@ def main():
             plot_prefix=f"{base_model_name}_all_non_train"
         )
 
-        # 3-panel results plot for all non-train
         plot_results(
             nt_h_seqs, nt_b_seqs,
             all_nt_scores, all_nt_labels,
@@ -393,8 +599,120 @@ def main():
             title_prefix=f"{base_model_name} (all_non_train)"
         )
 
-    if args.mode == "orig" and args.skip_orig_sets:
-        print("Mode is 'orig' but --skip_orig_sets is set; no evaluation was performed.")
+    # ALL_OTHER_FILES MODE: recursively list pre-processing txt files, exclude orig splits by filename,
+    # then parse + feature-extract on the fly using the same logic as training.
+    if args.mode == "all_other_files":
+        print("\n" + "=" * 40)
+        print("Evaluating ALL OTHER RAW TXT FILES (pre-processing, excluding orig train/val/test by filename)")
+        print("=" * 40)
+
+        data_root_abs = os.path.abspath(args.data_root)
+        print(f"Walking data_root={data_root_abs} ...")
+        all_fs_files = list_all_files_recursive(data_root_abs)
+        print(f"Total files found on filesystem: {len(all_fs_files)}")
+
+        # Only .txt files
+        txt_files = [p for p in all_fs_files if p.lower().endswith(".txt")]
+        print(f".txt files found: {len(txt_files)}")
+
+        # Build exclusion set from filenames of all original (post-processed) split lists
+        split_exclude_names = set(
+            os.path.basename(f) for f in (
+                    list(train_human) +
+                    list(val_human) +
+                    list(test_human) +
+                    list(val_bots) +
+                    list(test_bots)
+            )
+        )
+
+        # Filter out any .txt whose basename matches original splits
+        txt_non_split = [
+            p for p in txt_files
+            if os.path.basename(p) not in split_exclude_names
+        ]
+        print(f".txt files after excluding original splits by filename: {len(txt_non_split)}")
+
+        if not txt_non_split:
+            print("No candidate 'other' txt files after exclusions.")
+        else:
+            # Build reference pool using the original train_human raw txt paths
+            # (assuming split['train_human'] contains raw txt paths).
+            ref_dwells, ref_flights = create_reference_pool(train_human)
+
+            other_feature_seqs = {}
+            for p in txt_non_split:
+                seq = compute_features_for_raw_file(
+                    p,
+                    ref_dwells,
+                    ref_flights,
+                    step_size=STEP_SIZE_HUMAN  # or choose based on naming if needed
+                )
+                if seq.size > 0:
+                    other_feature_seqs[p] = seq
+                else:
+                    print(f"Skipping {p}: too short or no valid windows.")
+
+            print(f"Other txt files with usable feature sequences: {len(other_feature_seqs)}")
+
+            if not other_feature_seqs:
+                print("No usable 'other' txt files. Nothing to evaluate.")
+            else:
+                # Run inference on these feature sequences directly (bypassing features_cache)
+                sp = model_data['sp']
+                tm = model_data['tm']
+                encoder = model_data['encoder']
+                input_width = model_data['input_width']
+                active_columns = SDR(sp.getColumnDimensions())
+
+                scores = []
+                labels = []  # you choose: e.g., treat all as bots
+                seqs = []
+
+                is_bot_for_others = True
+
+                print(f"Running inference on {len(other_feature_seqs)} 'other' files...")
+                for filepath, feats_seq in other_feature_seqs.items():
+                    tm.reset()
+                    file_scores = []
+                    for feats in feats_seq:
+                        dense_input = encoder.encode(feats)
+                        enc_sdr = SDR(input_width)
+                        enc_sdr.dense = dense_input
+
+                        sp.compute(enc_sdr, False, active_columns)
+                        tm.compute(active_columns, learn=False)
+
+                        file_scores.append(tm.anomaly)
+
+                    if file_scores:
+                        valid_scores = file_scores[5:] if len(file_scores) > 5 else file_scores
+                        scores.append(np.mean(valid_scores))
+                        labels.append(1 if is_bot_for_others else 0)
+                        seqs.append(file_scores)
+
+                if not scores:
+                    print("No scores produced for 'other' files.")
+                else:
+                    other_f1 = eval_and_report(
+                        scores, labels, best_thresh,
+                        subset_name="All Other Files", do_plot=True,
+                        plot_prefix=f"{base_model_name}_all_other_files"
+                    )
+
+                    # Use all sequences as 'bot' for the 3-panel plot
+                    plot_results(
+                        val_h_seqs=[],
+                        val_b_seqs=seqs,
+                        all_val_scores=scores,
+                        all_val_labels=labels,
+                        val_h_scores=[],
+                        val_b_scores=scores,
+                        best_thresh=best_thresh,
+                        val_f1=other_f1,
+                        fname_slug=f"{base_model_name}_all_other_files",
+                        title_prefix=f"{base_model_name} (all_other_files)"
+                    )
 
 
 if __name__ == "__main__":
