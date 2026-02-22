@@ -652,15 +652,14 @@ def main():
 
             print("\n[Stage A] Computing feature sequences for 'other' txt files (multiprocessing)...")
 
-            # Prepare arguments for workers
-            # If you know some are bots vs humans you can vary step_size; here we just use human step.
             worker_args = [
                 (p, ref_dwells, ref_flights, STEP_SIZE_HUMAN)
                 for p in txt_non_split
             ]
 
             other_feature_seqs = {}
-            num_workers = mp.cpu_count()  # or set manually
+            num_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", mp.cpu_count()))
+            print(f"Using {num_workers} worker processes.")
 
             with mp.Pool(processes=num_workers) as pool:
                 for filepath, seq in tqdm(
@@ -671,7 +670,6 @@ def main():
                 ):
                     if seq.size > 0:
                         other_feature_seqs[filepath] = seq
-                    # empty seq -> ignored, tqdm already shows progress
 
             print(f"    Other txt files with usable feature sequences: {len(other_feature_seqs)}")
 
