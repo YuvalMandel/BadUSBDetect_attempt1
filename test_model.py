@@ -6,7 +6,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
-
+import multiprocessing as mp
+from tqdm import tqdm
 import glob
 from scipy import stats
 import warnings
@@ -171,6 +172,10 @@ def compute_features_for_raw_file(filepath, ref_dwells, ref_flights, step_size):
             features_seq.append(ft_f + ft_d)
 
     return np.array(features_seq)
+
+def _compute_features_wrapper(args):
+    filepath, ref_dwells, ref_flights, step_size = args
+    return filepath, compute_features_for_raw_file(filepath, ref_dwells, ref_flights, step_size)
 
 def run_inference(model_data, file_features, file_list, is_bot, desc="Inference",
                   collect_seqs=False):
@@ -601,118 +606,74 @@ def main():
 
     # ALL_OTHER_FILES MODE: recursively list pre-processing txt files, exclude orig splits by filename,
     # then parse + feature-extract on the fly using the same logic as training.
+    # ALL_OTHER_FILES MODE: recursively list pre-processing txt files, exclude orig splits by filename,
+    # then parse + feature-extract on the fly using the same logic as training.
     if args.mode == "all_other_files":
         print("\n" + "=" * 40)
         print("Evaluating ALL OTHER RAW TXT FILES (pre-processing, excluding orig train/val/test by filename)")
         print("=" * 40)
 
         data_root_abs = os.path.abspath(args.data_root)
-        print(f"Walking data_root={data_root_abs} ...")
+        print(f"[1/4] Walking data_root={data_root_abs} ...")
         all_fs_files = list_all_files_recursive(data_root_abs)
-        print(f"Total files found on filesystem: {len(all_fs_files)}")
+        print(f"    Total files found on filesystem: {len(all_fs_files)}")
 
         # Only .txt files
+        print("[2/4] Filtering for .txt files...")
         txt_files = [p for p in all_fs_files if p.lower().endswith(".txt")]
-        print(f".txt files found: {len(txt_files)}")
+        print(f"    .txt files found: {len(txt_files)}")
 
         # Build exclusion set from filenames of all original (post-processed) split lists
         split_exclude_names = set(
             os.path.basename(f) for f in (
-                    list(train_human) +
-                    list(val_human) +
-                    list(test_human) +
-                    list(val_bots) +
-                    list(test_bots)
+                list(train_human) +
+                list(val_human) +
+                list(test_human) +
+                list(val_bots) +
+                list(test_bots)
             )
         )
 
         # Filter out any .txt whose basename matches original splits
+        print("[3/4] Excluding original split filenames...")
         txt_non_split = [
             p for p in txt_files
             if os.path.basename(p) not in split_exclude_names
         ]
-        print(f".txt files after excluding original splits by filename: {len(txt_non_split)}")
+        print(f"    .txt files after excluding original splits by filename: {len(txt_non_split)}")
 
         if not txt_non_split:
             print("No candidate 'other' txt files after exclusions.")
         else:
             # Build reference pool using the original train_human raw txt paths
-            # (assuming split['train_human'] contains raw txt paths).
+            print("[4/4] Building reference pool from train_human files...")
             ref_dwells, ref_flights = create_reference_pool(train_human)
+            print("    Reference pool built.")
+
+            print("\n[Stage A] Computing feature sequences for 'other' txt files (multiprocessing)...")
+
+            # Prepare arguments for workers
+            # If you know some are bots vs humans you can vary step_size; here we just use human step.
+            worker_args = [
+                (p, ref_dwells, ref_flights, STEP_SIZE_HUMAN)
+                for p in txt_non_split
+            ]
 
             other_feature_seqs = {}
-            for p in txt_non_split:
-                seq = compute_features_for_raw_file(
-                    p,
-                    ref_dwells,
-                    ref_flights,
-                    step_size=STEP_SIZE_HUMAN  # or choose based on naming if needed
-                )
-                if seq.size > 0:
-                    other_feature_seqs[p] = seq
-                else:
-                    print(f"Skipping {p}: too short or no valid windows.")
+            num_workers = mp.cpu_count()  # or set manually
 
-            print(f"Other txt files with usable feature sequences: {len(other_feature_seqs)}")
+            with mp.Pool(processes=num_workers) as pool:
+                for filepath, seq in tqdm(
+                        pool.imap_unordered(_compute_features_wrapper, worker_args),
+                        total=len(worker_args),
+                        desc="Feature extraction",
+                        unit="file"
+                ):
+                    if seq.size > 0:
+                        other_feature_seqs[filepath] = seq
+                    # empty seq -> ignored, tqdm already shows progress
 
-            if not other_feature_seqs:
-                print("No usable 'other' txt files. Nothing to evaluate.")
-            else:
-                # Run inference on these feature sequences directly (bypassing features_cache)
-                sp = model_data['sp']
-                tm = model_data['tm']
-                encoder = model_data['encoder']
-                input_width = model_data['input_width']
-                active_columns = SDR(sp.getColumnDimensions())
-
-                scores = []
-                labels = []  # you choose: e.g., treat all as bots
-                seqs = []
-
-                is_bot_for_others = True
-
-                print(f"Running inference on {len(other_feature_seqs)} 'other' files...")
-                for filepath, feats_seq in other_feature_seqs.items():
-                    tm.reset()
-                    file_scores = []
-                    for feats in feats_seq:
-                        dense_input = encoder.encode(feats)
-                        enc_sdr = SDR(input_width)
-                        enc_sdr.dense = dense_input
-
-                        sp.compute(enc_sdr, False, active_columns)
-                        tm.compute(active_columns, learn=False)
-
-                        file_scores.append(tm.anomaly)
-
-                    if file_scores:
-                        valid_scores = file_scores[5:] if len(file_scores) > 5 else file_scores
-                        scores.append(np.mean(valid_scores))
-                        labels.append(1 if is_bot_for_others else 0)
-                        seqs.append(file_scores)
-
-                if not scores:
-                    print("No scores produced for 'other' files.")
-                else:
-                    other_f1 = eval_and_report(
-                        scores, labels, best_thresh,
-                        subset_name="All Other Files", do_plot=True,
-                        plot_prefix=f"{base_model_name}_all_other_files"
-                    )
-
-                    # Use all sequences as 'bot' for the 3-panel plot
-                    plot_results(
-                        val_h_seqs=[],
-                        val_b_seqs=seqs,
-                        all_val_scores=scores,
-                        all_val_labels=labels,
-                        val_h_scores=[],
-                        val_b_scores=scores,
-                        best_thresh=best_thresh,
-                        val_f1=other_f1,
-                        fname_slug=f"{base_model_name}_all_other_files",
-                        title_prefix=f"{base_model_name} (all_other_files)"
-                    )
+            print(f"    Other txt files with usable feature sequences: {len(other_feature_seqs)}")
 
 
 if __name__ == "__main__":
