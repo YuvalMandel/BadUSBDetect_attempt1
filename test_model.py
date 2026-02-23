@@ -308,25 +308,42 @@ def plot_results(val_h_seqs, val_b_seqs,
 def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
                     do_plot=False, plot_prefix=None):
     preds = [1 if s >= best_thresh else 0 for s in all_scores]
-    f1 = f1_score(all_labels, preds)
+
+    # Determine which classes are present
+    unique_labels = sorted(set(all_labels))
+    label_names = ['Human', 'Bot']
+    present_target_names = [label_names[i] for i in unique_labels]
+
+    # Compute F1 using only present labels (consistent with classification_report)
+    f1 = f1_score(all_labels, preds, labels=unique_labels, zero_division=0)
+
     print("\n" + "=" * 40)
     print(f"{subset_name} RESULTS")
     print("=" * 40)
     print(f"{subset_name} F1: {f1:.4f}")
     print("-" * 40)
+
     print(f"{subset_name} Classification Report:")
-    print(classification_report(all_labels, preds, target_names=['Human', 'Bot']))
+    print(classification_report(
+        all_labels,
+        preds,
+        labels=unique_labels,
+        target_names=present_target_names,
+        zero_division=0
+    ))
 
     if do_plot and plot_prefix is not None:
         print(f"Generating confusion matrix plot for {subset_name}...")
-        cm = confusion_matrix(all_labels, preds)
+        cm = confusion_matrix(all_labels, preds, labels=unique_labels)
         plt.figure(figsize=(6, 5))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False)
+        # Use only the present classes for tick labels
+        tick_names = [label_names[i] for i in unique_labels]
         plt.title(f"{subset_name} (F1={f1:.4f})")
         plt.xlabel('Predicted')
         plt.ylabel('Actual')
-        plt.xticks([0.5, 1.5], ['Human', 'Bot'])
-        plt.yticks([0.5, 1.5], ['Human', 'Bot'])
+        plt.xticks(np.arange(len(unique_labels)) + 0.5, tick_names)
+        plt.yticks(np.arange(len(unique_labels)) + 0.5, tick_names)
         plt.tight_layout()
         plot_path = os.path.join(PLOTS_DIR, f"{plot_prefix}_{subset_name.replace(' ', '_').lower()}_confusion.png")
         plt.savefig(plot_path)
@@ -334,6 +351,7 @@ def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
         print(f"{subset_name} confusion plot saved to {plot_path}")
 
     return f1
+
 
 def validate_txt_file(path, min_cols=1):
     """
@@ -691,7 +709,7 @@ def main():
         labels = []
         seqs = []
 
-        is_bot_for_others = True  # or infer from folder names
+        is_bot_for_others = False  # or infer from folder names
 
         for filepath, feats_seq in tqdm(other_feature_seqs.items(),
                                         desc="Inference",
@@ -728,12 +746,12 @@ def main():
         )
 
         plot_results(
-            val_h_seqs=[],
-            val_b_seqs=seqs,
+            val_h_seqs=seqs,
+            val_b_seqs=[],
             all_val_scores=scores,
             all_val_labels=labels,
-            val_h_scores=[],
-            val_b_scores=scores,
+            val_h_scores=scores,
+            val_b_scores=[],
             best_thresh=best_thresh,
             val_f1=other_f1,
             fname_slug=f"{base_model_name}_all_other_files",
