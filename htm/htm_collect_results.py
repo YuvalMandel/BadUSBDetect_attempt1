@@ -1,9 +1,9 @@
 """
-collect_results.py
+htm/htm_collect_results.py
 Aggregate all completed HTM hyperparameter search runs into a leaderboard.
 
 Usage:
-  python collect_results.py [--top 20]
+  python htm/htm_collect_results.py [--top 20]
 
 Reads:   results/cfg*.json
 Writes:  results/leaderboard.csv
@@ -64,7 +64,7 @@ def main():
     records = load_results()
     if not records:
         print(f"No results found in {RESULTS_DIR}/. "
-              "Run htm_train_single.py jobs first.")
+              "Run htm/htm_train_single.py jobs first.")
         return
 
     # Sort by test F1 desc, break ties by val F1
@@ -98,7 +98,6 @@ def main():
     print(f"\nText report → {txt_path}")
 
     # ---- Write leaderboard.csv ----
-    # Collect all unique config keys
     all_cfg_keys = []
     for r in records:
         for k in r.get("config", {}):

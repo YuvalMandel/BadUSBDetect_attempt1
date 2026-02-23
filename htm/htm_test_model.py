@@ -1,41 +1,53 @@
-import argparse
+"""
+htm/htm_test_model.py
+Test a trained HTM model on multiple evaluation modes.
+
+Modes:
+  orig            — original val/test splits from split.pkl
+  all_non_train   — all cached files not in the training set (default)
+  all_other_files — raw .txt files outside the original splits + synthetic bots
+
+Usage:
+  python htm/htm_test_model.py --model models/<slug>.pkl [options]
+"""
+
 import os
-import pickle
 import sys
+
+# Allow imports from project root (common/, htm/)
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+import argparse
+import pickle
+import multiprocessing as mp
+import warnings
+import random
+
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
-import multiprocessing as mp
 from tqdm import tqdm
-import glob
-from scipy import stats
-import warnings
-import random
 
 warnings.filterwarnings('ignore')
 
-# Match training constants
-WINDOW_SIZE = 15
-STEP_SIZE_HUMAN = 1
-STEP_SIZE_BOT = 1
-NUM_REFERENCES = 50
-RANDOM_SEED = 42
-
-
-# Ensure htm_common is available
-try:
-    import htm_common
-except ImportError:
-    print("htm_common.py not found. Please ensure it is in the same directory.")
-    sys.exit(1)
-
-# HTM Imports
 try:
     from htm.bindings.sdr import SDR
 except ImportError:
     print("HTM libraries not found. Please install htm.core.")
     sys.exit(1)
+
+from common.keystroke_features import (
+    RANDOM_SEED, DEFAULT_WINDOW_SIZE, NUM_REFERENCES,
+    parse_file, extract_features, create_reference_pool,
+)
+
+# Match training step sizes
+WINDOW_SIZE     = DEFAULT_WINDOW_SIZE
+STEP_SIZE_HUMAN = 1
+STEP_SIZE_BOT   = 1
 
 # ------------------------------------------------------------------
 # Paths
@@ -43,120 +55,18 @@ except ImportError:
 PLOTS_DIR = "plots"
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
-def parse_file(filepath):
-    dwells = []
-    flights = []
-    active_keys = {}
-    last_keyup = None
 
-    try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
-    except Exception:
-        return np.array([]), np.array([])
-
-    for line in lines:
-        parts = line.strip().split()
-        if len(parts) < 3:
-            continue
-        key, action = parts[0], parts[1]
-        try:
-            ts = int(parts[2])
-        except ValueError:
-            continue
-
-        scale = 10000.0 if ts > 10**15 else 1.0
-
-        if action == "KeyDown":
-            active_keys[key] = ts
-            if last_keyup is not None:
-                delta = (ts - last_keyup) / scale
-                if 0 < delta < 5000:
-                    flights.append(delta)
-        elif action == "KeyUp":
-            last_keyup = ts
-            if key in active_keys:
-                down_ts = active_keys.pop(key)
-                delta = (ts - down_ts) / scale
-                if 0 < delta < 3000:
-                    dwells.append(delta)
-
-    return np.array(dwells), np.array(flights)
-
-
-def extract_features(window_data, reference_pool):
-    if len(window_data) < WINDOW_SIZE:
-        return None
-    if np.isnan(window_data).any():
-        return None
-
-    feat_mean = np.mean(window_data)
-    feat_med  = np.median(window_data)
-    feat_std  = np.std(window_data)
-
-    if feat_std < 0.0001:
-        feat_skew, feat_kurt = 0, 10
-    else:
-        feat_skew = stats.skew(window_data)
-        feat_kurt = stats.kurtosis(window_data)
-
-    ks_scores, w_scores = [], []
-    for ref_win in reference_pool:
-        ks, _ = stats.ks_2samp(window_data, ref_win)
-        ks_scores.append(ks)
-        w_scores.append(stats.wasserstein_distance(window_data, ref_win))
-
-    return [feat_mean, feat_med, feat_std, feat_skew, feat_kurt,
-            np.min(ks_scores), np.min(w_scores)]
-
-
-def create_reference_pool(train_human_files):
-    """Rebuild the reference pools exactly like training, using train_human paths from split.pkl."""
-    print("--- Collecting Reference Pool (train humans only) ---")
-    all_human_dwells  = []
-    all_human_flights = []
-
-    sample_files = list(train_human_files)
-    random.shuffle(sample_files)
-
-    for filepath in sample_files[:50]:
-        d, fl = parse_file(filepath)
-        if len(d)  >= WINDOW_SIZE: all_human_dwells.extend(d)
-        if len(fl) >= WINDOW_SIZE: all_human_flights.extend(fl)
-
-    ref_dwells, ref_flights = [], []
-
-    if len(all_human_dwells) > WINDOW_SIZE:
-        for _ in range(NUM_REFERENCES):
-            max_start = len(all_human_dwells) - WINDOW_SIZE
-            start = random.randint(0, max_start)
-            ref_dwells.append(np.array(all_human_dwells[start: start + WINDOW_SIZE]))
-
-    if len(all_human_flights) > WINDOW_SIZE:
-        for _ in range(NUM_REFERENCES):
-            max_start = len(all_human_flights) - WINDOW_SIZE
-            start = random.randint(0, max_start)
-            ref_flights.append(np.array(all_human_flights[start: start + WINDOW_SIZE]))
-
-    return ref_dwells, ref_flights
-
-
-
-def load_model(model_path):
-    print(f"Loading model from {model_path}...")
-    with open(model_path, 'rb') as f:
-        model_data = pickle.load(f)
-    return model_data
-
+# ------------------------------------------------------------------
+# Feature computation for raw txt files (for all_other_files mode)
+# ------------------------------------------------------------------
 def compute_features_for_raw_file(filepath, ref_dwells, ref_flights, step_size):
     """
-    Parse a raw keystroke .txt file and compute the same feature sequences
-    used during training (dwells + flights windows).
-    Returns np.array of shape [num_windows, feature_dim] or empty array.
+    Parse a raw keystroke .txt file and compute the feature sequence used
+    during training (dwell + flight windows concatenated).
+    Returns np.array of shape [num_windows, 14] or empty array.
     """
     d, f = parse_file(filepath)
     min_len = min(len(d), len(f))
-
     features_seq = []
     if min_len < WINDOW_SIZE:
         return np.array([])
@@ -164,63 +74,51 @@ def compute_features_for_raw_file(filepath, ref_dwells, ref_flights, step_size):
     for i in range(0, min_len - WINDOW_SIZE, step_size):
         w_d = d[i: i + WINDOW_SIZE]
         w_f = f[i: i + WINDOW_SIZE]
-
-        ft_d = extract_features(w_d, ref_dwells)
-        ft_f = extract_features(w_f, ref_flights)
-
+        ft_d = extract_features(w_d, ref_dwells, WINDOW_SIZE)
+        ft_f = extract_features(w_f, ref_flights, WINDOW_SIZE)
         if ft_d and ft_f:
             features_seq.append(ft_f + ft_d)
 
     return np.array(features_seq)
 
+
 def _compute_features_wrapper(args):
     filepath, ref_dwells, ref_flights, step_size = args
     return filepath, compute_features_for_raw_file(filepath, ref_dwells, ref_flights, step_size)
 
+
+# ------------------------------------------------------------------
+# Inference
+# ------------------------------------------------------------------
 def run_inference(model_data, file_features, file_list, is_bot, desc="Inference",
                   collect_seqs=False):
     """
-    If collect_seqs=True, also return the raw anomaly sequences per file
-    (for plotting anomaly-over-time).
+    Run HTM inference on a list of files using cached feature sequences.
+    If collect_seqs=True, also returns per-file raw anomaly score sequences.
     """
-    sp = model_data['sp']
-    tm = model_data['tm']
-    encoder = model_data['encoder']
+    sp          = model_data['sp']
+    tm          = model_data['tm']
+    encoder     = model_data['encoder']
     input_width = model_data['input_width']
-
-    # Create SDR object for input
     active_columns = SDR(sp.getColumnDimensions())
 
-    scores = []
-    labels = []
-    seqs = []
-
+    scores, labels, seqs = [], [], []
     print(f"Running {desc} on {len(file_list)} files...")
 
     for filepath in file_list:
         if filepath not in file_features:
             continue
-
-        # Reset Temporal Memory for each new sequence
         tm.reset()
-
         file_scores = []
         for feats in file_features[filepath]:
-            # Encode
             dense_input = encoder.encode(feats)
             enc_sdr = SDR(input_width)
             enc_sdr.dense = dense_input
-
-            # Spatial Pooler (learning disabled)
             sp.compute(enc_sdr, False, active_columns)
-
-            # Temporal Memory (learning disabled)
             tm.compute(active_columns, learn=False)
-
             file_scores.append(tm.anomaly)
 
         if file_scores:
-            # Skip warmup (first 5 steps)
             valid_scores = file_scores[5:] if len(file_scores) > 5 else file_scores
             scores.append(np.mean(valid_scores))
             labels.append(1 if is_bot else 0)
@@ -251,7 +149,6 @@ def plot_results(val_h_seqs, val_b_seqs,
     title = f"{title_prefix} Val F1={val_f1:.4f}"
     fig.suptitle(title, fontsize=7)
 
-    # Panel 1 — anomaly score over time
     ax = axes[0]
     n = min(3, len(val_h_seqs), len(val_b_seqs))
     for i in range(n):
@@ -267,7 +164,6 @@ def plot_results(val_h_seqs, val_b_seqs,
     ax.legend()
     ax.grid(True)
 
-    # Panel 2 — per-file mean score distribution
     ax = axes[1]
     ax.hist(val_h_scores, bins=15, alpha=0.65, color='steelblue', label='Human')
     ax.hist(val_b_scores, bins=15, alpha=0.65, color='tomato', label='Bot')
@@ -279,7 +175,6 @@ def plot_results(val_h_seqs, val_b_seqs,
     ax.legend()
     ax.grid(True)
 
-    # Panel 3 — F1 vs threshold
     ax = axes[2]
     ths = np.linspace(0, 1, 200)
     f1s = [
@@ -307,14 +202,16 @@ def plot_results(val_h_seqs, val_b_seqs,
 
 def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
                     do_plot=False, plot_prefix=None):
+    """
+    Compute metrics and print a classification report.
+    Handles single-class subsets gracefully (no shape errors).
+    """
     preds = [1 if s >= best_thresh else 0 for s in all_scores]
 
-    # Determine which classes are present
     unique_labels = sorted(set(all_labels))
-    label_names = ['Human', 'Bot']
+    label_names   = ['Human', 'Bot']
     present_target_names = [label_names[i] for i in unique_labels]
 
-    # Compute F1 using only present labels (consistent with classification_report)
     f1 = f1_score(all_labels, preds, labels=unique_labels, zero_division=0)
 
     print("\n" + "=" * 40)
@@ -322,11 +219,9 @@ def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
     print("=" * 40)
     print(f"{subset_name} F1: {f1:.4f}")
     print("-" * 40)
-
     print(f"{subset_name} Classification Report:")
     print(classification_report(
-        all_labels,
-        preds,
+        all_labels, preds,
         labels=unique_labels,
         target_names=present_target_names,
         zero_division=0
@@ -337,7 +232,6 @@ def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
         cm = confusion_matrix(all_labels, preds, labels=unique_labels)
         plt.figure(figsize=(6, 5))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False)
-        # Use only the present classes for tick labels
         tick_names = [label_names[i] for i in unique_labels]
         plt.title(f"{subset_name} (F1={f1:.4f})")
         plt.xlabel('Predicted')
@@ -345,7 +239,10 @@ def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
         plt.xticks(np.arange(len(unique_labels)) + 0.5, tick_names)
         plt.yticks(np.arange(len(unique_labels)) + 0.5, tick_names)
         plt.tight_layout()
-        plot_path = os.path.join(PLOTS_DIR, f"{plot_prefix}_{subset_name.replace(' ', '_').lower()}_confusion.png")
+        plot_path = os.path.join(
+            PLOTS_DIR,
+            f"{plot_prefix}_{subset_name.replace(' ', '_').lower()}_confusion.png"
+        )
         plt.savefig(plot_path)
         plt.close()
         print(f"{subset_name} confusion plot saved to {plot_path}")
@@ -353,70 +250,18 @@ def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
     return f1
 
 
-def validate_txt_file(path, min_cols=1):
-    """
-    Basic sanity check for a .txt file.
-    - Tries to read lines.
-    - Splits on whitespace or comma.
-    - Ensures at least one non-empty line.
-    - Ensures all non-empty lines have the same number of numeric columns.
-    Returns True if the file 'makes sense', False otherwise.
-    """
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            first_cols = None
-            any_valid = False
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                # Split on comma first, fallback to whitespace
-                if "," in line:
-                    parts = [p.strip() for p in line.split(",")]
-                else:
-                    parts = line.split()
-
-                # Try to parse as floats
-                vals = []
-                for p in parts:
-                    if not p:
-                        continue
-                    try:
-                        vals.append(float(p))
-                    except ValueError:
-                        # Not numeric, reject file
-                        return False
-
-                if not vals:
-                    continue
-
-                if first_cols is None:
-                    first_cols = len(vals)
-                    if first_cols < min_cols:
-                        return False
-                else:
-                    if len(vals) != first_cols:
-                        return False
-
-                any_valid = True
-
-            return bool(any_valid)
-    except Exception as e:
-        print(f"Warning: failed to read/validate {path}: {e}")
-        return False
-
-
 def list_all_files_recursive(root_dir):
     """Return a list of all files under root_dir (recursive)."""
     paths = []
     for r, _, files in os.walk(root_dir):
         for fname in files:
-            # print(fname)
-            full = os.path.join(r, fname)
-            paths.append(os.path.abspath(full))
+            paths.append(os.path.abspath(os.path.join(r, fname)))
     return paths
 
 
+# ------------------------------------------------------------------
+# Main
+# ------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
         description="Test a trained HTM model on Test/Val sets, all non-train, or other files."
@@ -439,65 +284,65 @@ def main():
     parser.add_argument(
         "--mode",
         choices=["orig", "all_non_train", "all_other_files"],
-        default="all_other_files",
+        default="all_non_train",
         help=(
             "Evaluation mode: "
             "'orig' uses original val/test splits. "
-            "'all_non_train' evaluates all files not in the original train set "
-            "(using split/feature keys). "
-            "'all_other_files' walks the filesystem under --data_root, then "
-            "filters out any files that are part of the original train/val/test sets."
+            "'all_non_train' evaluates all cached files not in the training set. "
+            "'all_other_files' walks the filesystem under --data_root and evaluates "
+            "files not present in the original splits."
         )
     )
     parser.add_argument(
         "--data_root",
         default="../UB_keystroke_dataset/",
-        help="Root directory to search for 'other' files when mode=all_other_files."
+        help="Root directory to search for 'other' human files when mode=all_other_files."
+    )
+    parser.add_argument(
+        "--synthetic_bots_root",
+        default="../bots_synt_dataset/Synthetic_Bots",
+        help="Root directory for synthetic bot txt files when mode=all_other_files."
     )
     parser.add_argument(
         "--skip_orig_sets",
         action="store_true",
-        help="If set, skip evaluation and plots for original val/test sets (only relevant for mode=orig)."
+        help="If set, skip evaluation of original val/test sets (only relevant for mode=orig)."
     )
 
     args = parser.parse_args()
 
-    # Check files
-    if not os.path.exists(args.model):
-        print(f"Error: Model file '{args.model}' not found.")
-        sys.exit(1)
-    if not os.path.exists(args.split):
-        print(f"Error: Split file '{args.split}' not found.")
-        sys.exit(1)
-    if not os.path.exists(args.features):
-        print(f"Error: Features file '{args.features}' not found.")
-        sys.exit(1)
+    for path, label in [(args.model, "Model"), (args.split, "Split"),
+                        (args.features, "Features")]:
+        if not os.path.exists(path):
+            print(f"Error: {label} file '{path}' not found.")
+            sys.exit(1)
 
-    # Load Data
+    # Load data
     print("Loading data...")
     with open(args.split, 'rb') as f:
         split = pickle.load(f)
     with open(args.features, 'rb') as f:
         features_cache = pickle.load(f)
 
-    # Load Model
-    model_data = load_model(args.model)
+    # Load model
+    print(f"Loading model from {args.model}...")
+    with open(args.model, 'rb') as f:
+        model_data = pickle.load(f)
     best_thresh = model_data.get('best_thresh', 0.5)
     print(f"Model loaded. Using threshold: {best_thresh:.4f}")
 
-    # Model-based slug for plots
     base_model_name = os.path.splitext(os.path.basename(args.model))[0]
 
-    # Original splits (paths as stored in split/features_cache)
     train_human = split.get('train_human', [])
-    val_human = split.get('val_human', [])
-    test_human = split.get('test_human', [])
-    val_bots = split.get('val_bots', [])
-    test_bots = split.get('test_bots', [])
+    val_human   = split.get('val_human', [])
+    test_human  = split.get('test_human', [])
+    val_bots    = split.get('val_bots', [])
+    test_bots   = split.get('test_bots', [])
 
-    # ORIG MODE: behave as before (optionally skip printing/orig plots)
+    # ------------------------------------------------------------------
+    # MODE: orig
+    # ------------------------------------------------------------------
     if args.mode == "orig" and not args.skip_orig_sets:
-        # Validation Set (collect sequences for the 3-panel plot)
         val_h_scores, val_h_labels, val_h_seqs = run_inference(
             model_data, features_cache, val_human, False,
             "Validation (Human)", collect_seqs=True
@@ -506,22 +351,18 @@ def main():
             model_data, features_cache, val_bots, True,
             "Validation (Bot)", collect_seqs=True
         )
-
         all_val_scores = val_h_scores + val_b_scores
         all_val_labels = val_h_labels + val_b_labels
 
-        # Test Set
         test_h_scores, test_h_labels = run_inference(
             model_data, features_cache, test_human, False, "Test (Human)"
         )
         test_b_scores, test_b_labels = run_inference(
             model_data, features_cache, test_bots, True, "Test (Bot)"
         )
-
         all_test_scores = test_h_scores + test_b_scores
         all_test_labels = test_h_labels + test_b_labels
 
-        # Calculate Metrics + Plots
         print("\n" + "=" * 40)
         print("RESULTS (Original Splits)")
         print("=" * 40)
@@ -530,12 +371,11 @@ def main():
             all_val_scores, all_val_labels, best_thresh,
             subset_name="Validation", do_plot=False
         )
-        test_f1 = eval_and_report(
+        eval_and_report(
             all_test_scores, all_test_labels, best_thresh,
             subset_name="Test", do_plot=False
         )
 
-        # 3-panel results plot (using validation data)
         plot_results(
             val_h_seqs, val_b_seqs,
             all_val_scores, all_val_labels,
@@ -545,43 +385,38 @@ def main():
             title_prefix=f"{base_model_name} (orig)"
         )
 
-        # Combined confusion matrices plot
         print("Generating combined confusion matrices plot...")
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-
-        cm_val = confusion_matrix(all_val_labels, [1 if s >= best_thresh else 0 for s in all_val_scores])
-        sns.heatmap(cm_val, annot=True, fmt='d', cmap='Blues', ax=axes[0], cbar=False)
-        axes[0].set_title(f"Validation Set (F1={val_f1:.4f})")
-        axes[0].set_xlabel('Predicted')
-        axes[0].set_ylabel('Actual')
-        axes[0].set_xticklabels(['Human', 'Bot'])
-        axes[0].set_yticklabels(['Human', 'Bot'])
-
-        cm_test = confusion_matrix(all_test_labels, [1 if s >= best_thresh else 0 for s in all_test_scores])
-        sns.heatmap(cm_test, annot=True, fmt='d', cmap='Blues', ax=axes[1], cbar=False)
-        axes[1].set_title(f"Test Set (F1={test_f1:.4f})")
-        axes[1].set_xlabel('Predicted')
-        axes[1].set_ylabel('Actual')
-        axes[1].set_xticklabels(['Human', 'Bot'])
-        axes[1].set_yticklabels(['Human', 'Bot'])
-
+        for ax, (lbl, sc, title) in zip(axes, [
+            (all_val_labels,  all_val_scores,  "Validation Set"),
+            (all_test_labels, all_test_scores, "Test Set"),
+        ]):
+            preds = [1 if s >= best_thresh else 0 for s in sc]
+            f1    = f1_score(lbl, preds, zero_division=0)
+            cm    = confusion_matrix(lbl, preds)
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax, cbar=False)
+            ax.set_title(f"{title} (F1={f1:.4f})")
+            ax.set_xlabel('Predicted'); ax.set_ylabel('Actual')
+            ax.set_xticklabels(['Human', 'Bot'])
+            ax.set_yticklabels(['Human', 'Bot'])
         plt.tight_layout()
         orig_plot_path = os.path.join(PLOTS_DIR, f"{base_model_name}_orig_confusion.png")
         plt.savefig(orig_plot_path)
         plt.close()
         print(f"Original splits confusion plot saved to {orig_plot_path}")
 
-    # ALL_NON_TRAIN MODE: evaluate all files not in train set (using split/feature keys)
+    # ------------------------------------------------------------------
+    # MODE: all_non_train
+    # ------------------------------------------------------------------
     if args.mode == "all_non_train":
         print("\n" + "=" * 40)
         print("Evaluating ALL NON-TRAIN FILES (based on split/features_cache)")
         print("=" * 40)
 
         train_human_set = set(train_human)
-        all_files = list(features_cache.keys())
-
-        known_human = set(train_human) | set(val_human) | set(test_human)
-        known_bot = set(val_bots) | set(test_bots)
+        all_files       = list(features_cache.keys())
+        known_human     = set(train_human) | set(val_human) | set(test_human)
+        known_bot       = set(val_bots) | set(test_bots)
 
         non_train_human_files = [
             f for f in all_files
@@ -622,151 +457,123 @@ def main():
             title_prefix=f"{base_model_name} (all_non_train)"
         )
 
-    # ALL_OTHER_FILES MODE: evaluate raw txt files not in original splits (humans) + synthetic bot txt files.
+    # ------------------------------------------------------------------
+    # MODE: all_other_files
+    # ------------------------------------------------------------------
     if args.mode == "all_other_files":
         print("\n" + "=" * 40)
-        print("Evaluating ALL OTHER RAW TXT FILES (pre-processing, excluding orig train/val/test by filename, plus synthetic bots)")
+        print("Evaluating ALL OTHER RAW TXT FILES (filesystem, excluding original splits)")
         print("=" * 40)
 
-        # ---------- OTHER HUMAN FILES ----------
+        split_exclude_names = set(
+            os.path.basename(f) for f in (
+                list(train_human) + list(val_human) + list(test_human) +
+                list(val_bots) + list(test_bots)
+            )
+        )
+
+        # ---------- Other human files ----------
         data_root_abs = os.path.abspath(args.data_root)
         print(f"[1/5] Walking data_root={data_root_abs} ...")
         all_fs_files = list_all_files_recursive(data_root_abs)
-        print(f"    Total files found on filesystem: {len(all_fs_files)}")
+        print(f"    Total files found: {len(all_fs_files)}")
 
         print("[2/5] Filtering for .txt files (other humans)...")
         txt_files = [p for p in all_fs_files if p.lower().endswith(".txt")]
         print(f"    .txt files found: {len(txt_files)}")
 
-        # Exclude original split filenames (post-processed) by basename
-        split_exclude_names = set(
-            os.path.basename(f) for f in (
-                list(train_human) +
-                list(val_human) +
-                list(test_human) +
-                list(val_bots) +
-                list(test_bots)
-            )
-        )
-
         print("[3/5] Excluding original split filenames from other humans...")
-        txt_non_split_humans = [
+        candidate_humans = [
             p for p in txt_files
             if os.path.basename(p) not in split_exclude_names
         ]
-        print(f"    .txt human files after excluding original splits by filename: {len(txt_non_split_humans)}")
+        print(f"    Human candidates after exclusions: {len(candidate_humans)}")
 
-        # ---------- SYNTHETIC BOT FILES ----------
-        # Folder you mentioned: ../bots_synt_dataset/Synthetic_Bots/
-        # We treat all .txt there as synthetic bots.
-        synt_bots_root = os.path.abspath("../bots_synt_dataset/Synthetic_Bots")
+        # ---------- Synthetic bot files ----------
+        synt_bots_root = os.path.abspath(args.synthetic_bots_root)
         print(f"[4/5] Walking synthetic bots root={synt_bots_root} ...")
         if os.path.isdir(synt_bots_root):
-            synt_fs_files = list_all_files_recursive(synt_bots_root)
-            synt_txt_files = [p for p in synt_fs_files if p.lower().endswith(".txt")]
-            print(f"    Synthetic bot .txt files found: {len(synt_txt_files)}")
+            synt_files = list_all_files_recursive(synt_bots_root)
+            synt_txt   = [p for p in synt_files if p.lower().endswith(".txt")]
+            candidate_bots = [
+                p for p in synt_txt
+                if os.path.basename(p) not in split_exclude_names
+            ]
+            print(f"    Bot candidates after exclusions: {len(candidate_bots)}")
         else:
-            synt_txt_files = []
-            print("    Synthetic bots directory not found; skipping synthetic bots.")
-
-        # Optional: also exclude any synthetic filenames that overlap original splits
-        synt_txt_non_split = [
-            p for p in synt_txt_files
-            if os.path.basename(p) not in split_exclude_names
-        ]
-        print(f"    Synthetic bot .txt files after excluding original splits by filename: {len(synt_txt_non_split)}")
-
-        # Combined candidates: other humans + synthetic bots
-        candidate_humans = txt_non_split_humans
-        candidate_bots = synt_txt_non_split
+            candidate_bots = []
+            print("    Synthetic bots directory not found; skipping.")
 
         if not candidate_humans and not candidate_bots:
-            print("No candidate 'other' txt files (humans or synthetic bots) after exclusions.")
+            print("No candidate 'other' txt files after exclusions.")
             return
 
-        # ---------- Reference pool (from train_human) ----------
+        # ---------- Reference pool ----------
         print("[5/5] Building reference pool from train_human files...")
         ref_dwells, ref_flights = create_reference_pool(train_human)
         print("    Reference pool built.")
 
-        # ---------- Stage A: feature extraction (multiprocessing) ----------
-        print("\n[Stage A] Computing feature sequences for 'other humans' and synthetic bots (multiprocessing)...")
-
-        worker_args = []
-        # humans use STEP_SIZE_HUMAN
-        for p in candidate_humans:
-            worker_args.append((p, ref_dwells, ref_flights, STEP_SIZE_HUMAN))
-        # bots can use STEP_SIZE_BOT if you want, or same as humans
-        for p in candidate_bots:
-            worker_args.append((p, ref_dwells, ref_flights, STEP_SIZE_BOT))
+        # ---------- Stage A: parallel feature extraction ----------
+        print("\n[Stage A] Computing feature sequences (multiprocessing)...")
+        worker_args = (
+            [(p, ref_dwells, ref_flights, STEP_SIZE_HUMAN) for p in candidate_humans]
+            + [(p, ref_dwells, ref_flights, STEP_SIZE_BOT) for p in candidate_bots]
+        )
 
         other_feature_seqs = {}
         num_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", mp.cpu_count()))
-        print(f"Using {num_workers} worker processes for feature extraction.")
+        print(f"Using {num_workers} worker processes.")
 
         with mp.Pool(processes=num_workers) as pool:
             for filepath, seq in tqdm(
                 pool.imap_unordered(_compute_features_wrapper, worker_args),
-                total=len(worker_args),
-                desc="Feature extraction",
-                unit="file"
+                total=len(worker_args), desc="Feature extraction", unit="file"
             ):
                 if seq.size > 0:
                     other_feature_seqs[filepath] = seq
 
-        print(f"    Other txt files (humans + synthetic bots) with usable feature sequences: {len(other_feature_seqs)}")
+        print(f"    Files with usable features: {len(other_feature_seqs)}")
 
         if not other_feature_seqs:
             print("No usable 'other' txt files. Nothing to evaluate.")
             return
 
         # ---------- Stage B: inference ----------
-        print("\n[Stage B] Running inference on 'other humans' and synthetic bots...")
-
-        sp = model_data['sp']
-        tm = model_data['tm']
-        encoder = model_data['encoder']
+        print("\n[Stage B] Running inference...")
+        sp          = model_data['sp']
+        tm          = model_data['tm']
+        encoder     = model_data['encoder']
         input_width = model_data['input_width']
         active_columns = SDR(sp.getColumnDimensions())
 
-        scores = []
-        labels = []
-        seqs_human = []
-        seqs_bot = []
-
-        # Convenience sets for label assignment
+        scores, labels = [], []
+        seqs_human, seqs_bot = [], []
         humans_set = set(candidate_humans)
-        bots_set = set(candidate_bots)
+        bots_set   = set(candidate_bots)
 
         for filepath, feats_seq in tqdm(other_feature_seqs.items(),
-                                        desc="Inference",
-                                        unit="file"):
+                                        desc="Inference", unit="file"):
             tm.reset()
             file_scores = []
             for feats in feats_seq:
-                dense_input = encoder.encode(feats)
                 enc_sdr = SDR(input_width)
-                enc_sdr.dense = dense_input
-
+                enc_sdr.dense = encoder.encode(feats)
                 sp.compute(enc_sdr, False, active_columns)
                 tm.compute(active_columns, learn=False)
-
                 file_scores.append(tm.anomaly)
 
             if file_scores:
                 valid_scores = file_scores[5:] if len(file_scores) > 5 else file_scores
-                mean_score = np.mean(valid_scores)
+                mean_score   = np.mean(valid_scores)
 
-                # Decide label based on origin: human (0) or synthetic bot (1)
                 if filepath in bots_set:
-                    label = 1  # Bot
+                    labels.append(1)
                     seqs_bot.append(file_scores)
                 else:
-                    label = 0  # Human
+                    labels.append(0)
                     seqs_human.append(file_scores)
 
                 scores.append(mean_score)
-                labels.append(label)
 
         if not scores:
             print("No scores produced for 'other' files.")
@@ -774,14 +581,12 @@ def main():
 
         # ---------- Stage C: metrics + plots ----------
         print("\n[Stage C] Computing metrics and plots...")
-
         other_f1 = eval_and_report(
             scores, labels, best_thresh,
             subset_name="All Other Files", do_plot=True,
             plot_prefix=f"{base_model_name}_all_other_files"
         )
 
-        # For the 3-panel plot, split by human/bot scores
         human_scores = [s for s, l in zip(scores, labels) if l == 0]
         bot_scores   = [s for s, l in zip(scores, labels) if l == 1]
 

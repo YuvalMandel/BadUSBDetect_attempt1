@@ -1,4 +1,27 @@
+"""
+mlp/mlp_train.py
+MLP (supervised) classifier for BadUSB detection.
+Runs an Optuna hyperparameter search then a final training run.
+
+Prerequisites: run mlp_prepare_data.py then mlp_balance_train.py first.
+
+Usage:
+  python mlp/mlp_train.py
+
+Outputs (relative to project root):
+  badusb_model.pth           — best model weights
+  scaler_params.npy          — StandardScaler mean and scale
+  history_<slug>.png         — training history plot
+  confusion_<slug>.png       — confusion matrices (train / val / test)
+"""
+
 import os
+import sys
+
+# Run from project root so output files land there
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(_project_root)
+
 import copy
 import random
 import warnings
@@ -22,7 +45,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import confusion_matrix, f1_score, classification_report
 
 warnings.filterwarnings('ignore')
-optuna.logging.set_verbosity(optuna.logging.WARNING)  # show only our custom progress
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # ==============================================================================
 # CONFIGURATION
@@ -36,9 +59,9 @@ SCALER_SAVE_PATH = "scaler_params.npy"
 INPUT_SIZE = 14
 
 # --- Optuna search budget ---
-N_TRIALS        = 50   # number of hyperparameter trials
-OPTUNA_EPOCHS   = 40   # max epochs per Optuna trial
-OPTUNA_PATIENCE = 8    # early-stopping patience during search
+N_TRIALS        = 50
+OPTUNA_EPOCHS   = 40
+OPTUNA_PATIENCE = 8
 
 # --- Final training budget ---
 FINAL_EPOCHS   = 150
@@ -87,11 +110,8 @@ def _make_activation(name: str) -> nn.Module:
 
 class FlexibleBadUSBClassifier(nn.Module):
     """
-    Fully-connected binary classifier with configurable:
-      - depth and width
-      - activation function
-      - dropout rate
-      - optional BatchNorm1d after each linear layer
+    Fully-connected binary classifier with configurable depth, width,
+    activation, dropout, and optional BatchNorm.
     """
     def __init__(self, input_dim: int, hidden_dims: list,
                  dropout_rate: float = 0.3,
@@ -127,18 +147,14 @@ class FlexibleBadUSBClassifier(nn.Module):
 # ==============================================================================
 def build_optimizer_and_scheduler(params: dict, model: nn.Module,
                                   steps_per_epoch: int, n_epochs: int):
-    """
-    Constructs optimizer and LR scheduler from a flat parameter dict.
-    Returns (optimizer, scheduler, scheduler_name, step_per_batch).
-    """
-    opt_name     = params['optimizer']
-    lr           = params['lr']
-    wd           = params['weight_decay']
-    sched_name   = params['scheduler']
+    opt_name   = params['optimizer']
+    lr         = params['lr']
+    wd         = params['weight_decay']
+    sched_name = params['scheduler']
 
     if opt_name == 'adamw':
         optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
-    else:  # adam
+    else:
         optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=wd)
 
     step_per_batch = False
@@ -146,26 +162,22 @@ def build_optimizer_and_scheduler(params: dict, model: nn.Module,
     if sched_name == 'cosine':
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=n_epochs, eta_min=1e-7)
-
     elif sched_name == 'cosine_warm':
-        # Warm restarts: T_0=10 epochs, doubles every restart
         scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer, T_0=10, T_mult=2, eta_min=1e-7)
-
     elif sched_name == 'reduce_on_plateau':
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', factor=0.5, patience=5, min_lr=1e-7)
-
-    else:  # one_cycle — "super-convergence" schedule
+    else:  # one_cycle
         scheduler = optim.lr_scheduler.OneCycleLR(
             optimizer,
             max_lr=lr * 10,
             steps_per_epoch=steps_per_epoch,
             epochs=n_epochs,
-            pct_start=0.3,          # 30% warmup
+            pct_start=0.3,
             anneal_strategy='cos',
         )
-        step_per_batch = True       # OneCycleLR steps after every batch
+        step_per_batch = True
 
     return optimizer, scheduler, sched_name, step_per_batch
 
@@ -181,10 +193,8 @@ def train_epoch(model, loader, optimizer, scheduler=None,
     for X_b, y_b in loader:
         X_b, y_b = X_b.to(device), y_b.to(device)
         optimizer.zero_grad()
-
         pred = model(X_b)
 
-        # Label smoothing: maps 0→ε/2, 1→(1-ε/2)
         target = y_b * (1.0 - label_smoothing) + 0.5 * label_smoothing \
                  if label_smoothing > 0 else y_b
         loss = F.binary_cross_entropy(pred, target)
@@ -192,7 +202,6 @@ def train_epoch(model, loader, optimizer, scheduler=None,
 
         if clip_grad > 0.0:
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_grad)
-
         optimizer.step()
         if step_per_batch and scheduler is not None:
             scheduler.step()
@@ -214,7 +223,7 @@ def evaluate(model, loader):
     for X_b, y_b in loader:
         X_b, y_b = X_b.to(device), y_b.to(device)
         pred = model(X_b)
-        loss = F.binary_cross_entropy(pred, y_b)  # no smoothing during eval
+        loss = F.binary_cross_entropy(pred, y_b)
 
         tag = torch.round(pred)
         tot_acc  += (tag == y_b).float().mean().item()
@@ -229,22 +238,19 @@ def evaluate(model, loader):
 # 5. OPTUNA OBJECTIVE
 # ==============================================================================
 def objective(trial: optuna.Trial, X_train, y_train, X_val, y_val) -> float:
-    seed_everything(trial.number)  # reproducibility per trial
+    seed_everything(trial.number)
 
-    # ---- Architecture ----
     n_layers    = trial.suggest_int('n_layers', 2, 5)
     hidden_dims = [
         trial.suggest_categorical(f'h{i}', [32, 64, 128, 256, 512])
         for i in range(n_layers)
     ]
-    dropout     = trial.suggest_float('dropout',         0.0, 0.5)
-    batch_norm  = trial.suggest_categorical('batch_norm', [True, False])
-    activation  = trial.suggest_categorical('activation', ['relu', 'leaky_relu', 'elu', 'gelu'])
-
-    # ---- Regularization ----
+    dropout    = trial.suggest_float('dropout',         0.0, 0.5)
+    batch_norm = trial.suggest_categorical('batch_norm', [True, False])
+    activation = trial.suggest_categorical('activation',
+                     ['relu', 'leaky_relu', 'elu', 'gelu'])
     label_smooth = trial.suggest_float('label_smoothing', 0.0, 0.15)
 
-    # ---- Optimizer + Scheduler ----
     params = {
         'optimizer':    trial.suggest_categorical('optimizer',  ['adam', 'adamw']),
         'lr':           trial.suggest_float('lr',          1e-5, 1e-2, log=True),
@@ -252,14 +258,12 @@ def objective(trial: optuna.Trial, X_train, y_train, X_val, y_val) -> float:
         'scheduler':    trial.suggest_categorical('scheduler',
                             ['cosine', 'cosine_warm', 'reduce_on_plateau', 'one_cycle']),
     }
-
-    # ---- Data ----
     batch_size = trial.suggest_categorical('batch_size', [16, 32, 64, 128])
+
     train_loader = DataLoader(BadUSBDataset(X_train, y_train),
                               batch_size=batch_size, shuffle=True, drop_last=True)
     val_loader   = DataLoader(BadUSBDataset(X_val, y_val), batch_size=batch_size)
 
-    # ---- Build model ----
     model = FlexibleBadUSBClassifier(
         INPUT_SIZE, hidden_dims, dropout, batch_norm, activation
     ).to(device)
@@ -273,19 +277,15 @@ def objective(trial: optuna.Trial, X_train, y_train, X_val, y_val) -> float:
 
     for epoch in range(OPTUNA_EPOCHS):
         train_epoch(model, train_loader, optimizer, scheduler,
-                    step_per_batch=step_per_batch,
-                    label_smoothing=label_smooth)
-
+                    step_per_batch=step_per_batch, label_smoothing=label_smooth)
         val_loss, _, val_f1 = evaluate(model, val_loader)
 
-        # Step epoch-level schedulers
         if not step_per_batch:
             if sched_name == 'reduce_on_plateau':
                 scheduler.step(val_loss)
             else:
                 scheduler.step()
 
-        # Early stopping on val F1
         if val_f1 > best_val_f1:
             best_val_f1  = val_f1
             patience_cnt = 0
@@ -294,7 +294,6 @@ def objective(trial: optuna.Trial, X_train, y_train, X_val, y_val) -> float:
             if patience_cnt >= OPTUNA_PATIENCE:
                 break
 
-        # Report for pruner
         trial.report(val_f1, epoch)
         if trial.should_prune():
             raise optuna.exceptions.TrialPruned()
@@ -303,22 +302,18 @@ def objective(trial: optuna.Trial, X_train, y_train, X_val, y_val) -> float:
 
 
 # ==============================================================================
-# 6. FINAL TRAINING WITH BEST HYPERPARAMETERS
+# 6. FINAL TRAINING
 # ==============================================================================
 def train_final_model(best_params: dict, X_train, y_train, X_val, y_val):
-    """
-    Full training run using the best hyperparameters found by Optuna.
-    Saves the best checkpoint (lowest val loss) and applies early stopping.
-    """
     seed_everything()
 
-    n_layers    = best_params['n_layers']
-    hidden_dims = [best_params[f'h{i}'] for i in range(n_layers)]
-    dropout     = best_params['dropout']
-    batch_norm  = best_params['batch_norm']
-    activation  = best_params['activation']
+    n_layers     = best_params['n_layers']
+    hidden_dims  = [best_params[f'h{i}'] for i in range(n_layers)]
+    dropout      = best_params['dropout']
+    batch_norm   = best_params['batch_norm']
+    activation   = best_params['activation']
     label_smooth = best_params['label_smoothing']
-    batch_size  = best_params['batch_size']
+    batch_size   = best_params['batch_size']
 
     train_loader = DataLoader(BadUSBDataset(X_train, y_train),
                               batch_size=batch_size, shuffle=True, drop_last=True)
@@ -346,8 +341,7 @@ def train_final_model(best_params: dict, X_train, y_train, X_val, y_val):
     for epoch in range(FINAL_EPOCHS):
         tr_loss, tr_acc, tr_f1 = train_epoch(
             model, train_loader, optimizer, scheduler,
-            step_per_batch=step_per_batch,
-            label_smoothing=label_smooth,
+            step_per_batch=step_per_batch, label_smoothing=label_smooth,
         )
         val_loss, val_acc, val_f1 = evaluate(model, val_loader)
 
@@ -365,13 +359,11 @@ def train_final_model(best_params: dict, X_train, y_train, X_val, y_val):
         history['val_f1'].append(val_f1)
         history['lr'].append(current_lr)
 
-        # Checkpoint on best val loss
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             patience_cnt  = 0
             best_state    = copy.deepcopy(model.state_dict())
             torch.save(best_state, MODEL_SAVE_PATH)
-
         else:
             patience_cnt += 1
             if patience_cnt >= FINAL_PATIENCE:
@@ -393,7 +385,6 @@ def train_final_model(best_params: dict, X_train, y_train, X_val, y_val):
 # 7. VISUALIZATION
 # ==============================================================================
 def _params_to_slug(best_params: dict) -> str:
-    """Build a short, filesystem-safe string from key hyperparameters."""
     n = best_params.get('n_layers', '?')
     dims = [best_params.get(f'h{i}', '?') for i in range(n)]
     dims_str = '-'.join(str(d) for d in dims)
@@ -406,14 +397,12 @@ def _params_to_slug(best_params: dict) -> str:
     bs   = best_params.get('batch_size', '?')
     slug = (f"arch{dims_str}_act{act}_opt{opt}_lr{lr:.0e}"
             f"_sch{sch}_drop{drop:.2f}_bn{int(bn)}_bs{bs}")
-    # Replace characters not safe for filenames
     for ch in ['/', '\\', ':', '*', '?', '"', '<', '>', '|', ' ']:
         slug = slug.replace(ch, '_')
     return slug
 
 
 def _params_to_title(best_params: dict) -> str:
-    """Human-readable hyperparameter summary for plot titles."""
     n = best_params.get('n_layers', '?')
     dims = [best_params.get(f'h{i}', '?') for i in range(n)]
     return (
@@ -499,7 +488,7 @@ def plot_confusion_matrices(model, loaders, best_params: dict):
 
 
 # ==============================================================================
-# 8. DATA PREPARATION
+# 8. DATA LOADING
 # ==============================================================================
 def prepare_data():
     print("Loading pre-split data...")
@@ -507,16 +496,16 @@ def prepare_data():
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"'{path}' not found.\n"
-                "Run dataset_processing_balanced.py then transform_to_balance_dataset.py first."
+                "Run mlp/mlp_prepare_data.py then mlp/mlp_balance_train.py first."
             )
 
     train_df = pd.read_csv(CSV_TRAIN)
     val_df   = pd.read_csv(CSV_VAL)
     test_df  = pd.read_csv(CSV_TEST)
 
-    X_train = train_df.drop("Label", axis=1).values;  y_train = train_df["Label"].values
-    X_val   = val_df.drop("Label", axis=1).values;    y_val   = val_df["Label"].values
-    X_test  = test_df.drop("Label", axis=1).values;   y_test  = test_df["Label"].values
+    X_train = train_df.drop("Label", axis=1).values; y_train = train_df["Label"].values
+    X_val   = val_df.drop("Label", axis=1).values;   y_val   = val_df["Label"].values
+    X_test  = test_df.drop("Label", axis=1).values;  y_test  = test_df["Label"].values
 
     print(f"\nDataset sizes (person-disjoint splits):")
     print(f"  Train : {len(X_train):6d}  "
@@ -526,7 +515,6 @@ def prepare_data():
     print(f"  Test  : {len(X_test):6d}  "
           f"(humans: {(y_test==0).sum()}, bots: {(y_test==1).sum()})")
 
-    # Fit scaler on train only — prevent leakage
     scaler  = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_val   = scaler.transform(X_val)
@@ -544,13 +532,11 @@ def prepare_data():
 def main():
     seed_everything()
 
-    # ---- 1. Data ----
     (X_train, y_train), (X_val, y_val), (X_test, y_test) = prepare_data()
 
-    # ---- 2. Optuna hyperparameter search ----
     print(f"\nStarting Optuna search: {N_TRIALS} trials × up to {OPTUNA_EPOCHS} epochs ...")
     study = optuna.create_study(
-        direction='maximize',                     # maximise val F1
+        direction='maximize',
         sampler=TPESampler(seed=SEED),
         pruner=MedianPruner(n_startup_trials=10, n_warmup_steps=10),
     )
@@ -566,15 +552,12 @@ def main():
     print(f"  Best params : {study.best_params}")
     print("="*60)
 
-    # ---- 3. Final training with best hyperparameters ----
     model, history = train_final_model(
         study.best_params, X_train, y_train, X_val, y_val
     )
 
-    # ---- 4. Visualize training curves ----
     plot_history(history, study.best_params)
 
-    # ---- 5. Confusion matrices on all splits ----
     bs = study.best_params.get('batch_size', 32)
     train_loader = DataLoader(BadUSBDataset(X_train, y_train), batch_size=bs)
     val_loader   = DataLoader(BadUSBDataset(X_val,   y_val),   batch_size=bs)

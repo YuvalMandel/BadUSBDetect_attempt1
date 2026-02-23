@@ -1,23 +1,29 @@
 """
-htm_train_single.py
+htm/htm_train_single.py
 Train one HTM configuration. Designed to be called by a SLURM array task.
 
 Usage:
-  python htm_train_single.py --config configs/config_0023.json
+  python htm/htm_train_single.py --config configs/config_0023.json
 
-Outputs (all in subdirectories):
+Outputs (all relative to project root):
   models/  <slug>.pkl                — trained SP + TM + encoder + threshold
   plots/   <slug>_results.png        — anomaly-over-time / score dist / F1 curve
   plots/   <slug>_confusion.png      — val + test confusion matrices
   results/ <slug>.json               — scalar metrics + full config
 """
 
+import os
+import sys
+
+# Allow imports from project root (common/, htm/)
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 import argparse
 import json
-import os
 import pickle
 import random
-import sys
 
 import matplotlib
 matplotlib.use("Agg")   # non-interactive backend for SLURM nodes
@@ -34,10 +40,11 @@ except ImportError:
     print("ERROR: htm.core not installed.", file=sys.stderr)
     sys.exit(1)
 
-from htm_common import MultiAttributeEncoder, RANDOM_SEED
+from common.keystroke_features import RANDOM_SEED
+from htm_common import MultiAttributeEncoder
 
 # ------------------------------------------------------------------
-# Paths
+# Paths (relative to project root / CWD)
 # ------------------------------------------------------------------
 SPLIT_FILE  = "split.pkl"
 CACHE_FILE  = "features_cache.pkl"
@@ -199,10 +206,10 @@ def main():
 
     # ---- Load split + feature cache ----
     if not os.path.exists(SPLIT_FILE):
-        print(f"ERROR: {SPLIT_FILE} not found. Run prepare_data.py first.")
+        print(f"ERROR: {SPLIT_FILE} not found. Run htm/htm_prepare_data.py first.")
         sys.exit(1)
     if not os.path.exists(CACHE_FILE):
-        print(f"ERROR: {CACHE_FILE} not found. Run prepare_data.py first.")
+        print(f"ERROR: {CACHE_FILE} not found. Run htm/htm_prepare_data.py first.")
         sys.exit(1)
 
     with open(SPLIT_FILE, 'rb') as fh:
@@ -219,7 +226,7 @@ def main():
     # ---- Feature ranges (train only, no leakage) ----
     train_feats = [file_features[f] for f in train_human if f in file_features]
     if not train_feats:
-        print("ERROR: No training features in cache. Run prepare_data.py.")
+        print("ERROR: No training features in cache. Run htm/htm_prepare_data.py.")
         sys.exit(1)
     concat = np.vstack(train_feats)
     min_v  = np.min(concat, axis=0) - np.abs(np.min(concat, axis=0)) * 0.1

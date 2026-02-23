@@ -17,6 +17,9 @@ install_htm_logged.bat
 run_training.sh
 *.png
 __pycache__/
+common/__pycache__/
+htm/__pycache__/
+mlp/__pycache__/
 # HTM hyperparameter search outputs (binary / generated)
 models/
 plots/

@@ -1,7 +1,7 @@
 """
-htm_common.py
-Shared data-processing and encoding utilities used by all HTM scripts.
-HTM_training.py remains standalone and does NOT import from here.
+common/keystroke_features.py
+Shared keystroke-dynamics parsing and feature extraction utilities.
+Used by both the HTM and MLP pipelines.
 """
 
 import os
@@ -12,11 +12,11 @@ from scipy import stats
 # ------------------------------------------------------------------
 # Constants
 # ------------------------------------------------------------------
-RANDOM_SEED          = 42
-NUM_REFERENCES       = 50
-DEFAULT_WINDOW_SIZE  = 15
-DEFAULT_STEP_HUMAN   = 1
-DEFAULT_STEP_BOT     = 1
+RANDOM_SEED         = 42
+NUM_REFERENCES      = 50
+DEFAULT_WINDOW_SIZE = 15
+DEFAULT_STEP_HUMAN  = 1
+DEFAULT_STEP_BOT    = 1
 
 FOLDERS = {
     "Humans": [
@@ -32,11 +32,13 @@ FOLDERS = {
 # File helpers
 # ------------------------------------------------------------------
 def is_task1(filepath):
+    """Returns True if the file belongs to Task 1 (6th char of stem == '1')."""
     basename = os.path.splitext(os.path.basename(filepath))[0]
     return len(basename) == 6 and basename[5] == '1'
 
 
 def get_person_id(filepath):
+    """Extracts the 3-digit person ID (first 3 characters of the filename stem)."""
     return os.path.splitext(os.path.basename(filepath))[0][:3]
 
 
@@ -44,6 +46,10 @@ def get_person_id(filepath):
 # Keystroke parsing
 # ------------------------------------------------------------------
 def parse_file(filepath):
+    """
+    Parse a keystroke log .txt file.
+    Returns (dwells, flights) as numpy arrays of timing values in ms.
+    """
     dwells, flights = [], []
     active_keys = {}
     last_keyup  = None
@@ -87,6 +93,10 @@ def parse_file(filepath):
 # ------------------------------------------------------------------
 def extract_features(window_data, reference_pool,
                      window_size=DEFAULT_WINDOW_SIZE):
+    """
+    Compute a 7-dimensional feature vector for one timing window:
+    [mean, median, std, skew, kurtosis, min_KS_distance, min_Wasserstein_distance]
+    """
     if len(window_data) < window_size or np.isnan(window_data).any():
         return None
 
@@ -114,6 +124,11 @@ def create_reference_pool(train_human_files,
                           window_size=DEFAULT_WINDOW_SIZE,
                           num_references=NUM_REFERENCES,
                           seed=RANDOM_SEED):
+    """
+    Build KS/Wasserstein reference windows from training-set human files only
+    (no leakage from validation/test data).
+    Returns (ref_dwells, ref_flights) — lists of numpy arrays.
+    """
     rng = random.Random(seed)
     print("--- Building Reference Pool ---")
     all_dwells, all_flights = [], []
@@ -144,6 +159,11 @@ def create_reference_pool(train_human_files,
 # args = (filepath, step_size, ref_dwells, ref_flights, window_size)
 # ------------------------------------------------------------------
 def process_file_worker(args):
+    """
+    Worker function for parallel feature extraction.
+    Returns (filepath, feature_sequence) where feature_sequence is a
+    numpy array of shape [num_windows, 14].
+    """
     filepath, step_size, ref_dwells, ref_flights, window_size = args
     d, fl = parse_file(filepath)
     min_len = min(len(d), len(fl))
@@ -160,79 +180,3 @@ def process_file_worker(args):
             features_seq.append(ft_f + ft_d)
 
     return filepath, np.array(features_seq)
-
-
-# ------------------------------------------------------------------
-# Encoders
-# ------------------------------------------------------------------
-class SimpleScalarEncoder:
-    def __init__(self, min_val, max_val, n_bits, w):
-        self.min_val = min_val
-        self.max_val = max_val
-        self.n_bits  = n_bits
-        self.w       = w
-        self.range   = max(float(max_val - min_val), 1e-9)
-
-    def encode_into_array(self, value, dense_array, offset):
-        value = float(np.clip(value, self.min_val, self.max_val))
-        pos   = (value - self.min_val) / self.range
-        idx   = int(pos * (self.n_bits - self.w))
-        idx   = max(0, min(self.n_bits - self.w, idx))
-        for i in range(self.w):
-            dense_array[offset + idx + i] = 1
-
-
-class MultiAttributeEncoder:
-    def __init__(self, num_features, min_vals, max_vals,
-                 bits_per_feature=32, w=5):
-        self.encoders         = []
-        self.total_bits       = num_features * bits_per_feature
-        self.bits_per_feature = bits_per_feature
-        for i in range(num_features):
-            self.encoders.append(
-                SimpleScalarEncoder(min_vals[i], max_vals[i],
-                                    bits_per_feature, w)
-            )
-
-    def encode(self, features):
-        dense = np.zeros(self.total_bits, dtype=np.uint8)
-        for i, val in enumerate(features):
-            self.encoders[i].encode_into_array(
-                val, dense, i * self.bits_per_feature)
-        return dense
-
-
-# ------------------------------------------------------------------
-# Data splitting  (deterministic given seed)
-# ------------------------------------------------------------------
-def build_split(human_files, bot_files,
-                n_val_persons=15, seed=RANDOM_SEED):
-    """Return a dict with train/val/test file lists."""
-    rng = random.Random(seed)
-    person_ids = sorted(set(get_person_id(f) for f in human_files))
-    rng.shuffle(person_ids)
-    n       = len(person_ids)
-    n_val   = n_val_persons
-    n_train = n - n_val - (n - n_val) // 5   # ~80 % train, rest test
-
-    train_persons = set(person_ids[:n_train])
-    val_persons   = set(person_ids[n_train:n_train + n_val])
-    test_persons  = set(person_ids[n_train + n_val:])
-
-    train_human = [f for f in human_files if get_person_id(f) in train_persons]
-    val_human   = [f for f in human_files if get_person_id(f) in val_persons]
-    test_human  = [f for f in human_files if get_person_id(f) in test_persons]
-
-    shuffled_bots = list(bot_files)
-    rng.shuffle(shuffled_bots)
-    nb_val    = max(1, len(shuffled_bots) // 5)
-    val_bots  = shuffled_bots[:nb_val]
-    test_bots = shuffled_bots[nb_val:]
-
-    return {
-        'train_human': train_human,
-        'val_human':   val_human,
-        'test_human':  test_human,
-        'val_bots':    val_bots,
-        'test_bots':   test_bots,
-    }

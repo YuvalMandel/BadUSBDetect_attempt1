@@ -1,30 +1,39 @@
 """
-prepare_data.py
+htm/htm_prepare_data.py
 One-time data preparation for the HTM hyperparameter search.
 Run this ONCE (locally or on a login node) before submitting SLURM jobs.
 
-Creates / updates:
+Creates / updates (in the project root):
   split.pkl          — Reproducible train / val / test file lists
-  features_cache.pkl — Per-file keystroke feature sequences (window_size=15)
+  features_cache.pkl — Pre-computed feature sequences for every file
 
 Usage:
-  python prepare_data.py
+  python htm/htm_prepare_data.py
 """
+
+import os
+import sys
+
+# Allow imports from project root (common/, htm/)
+_project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 import glob
 import multiprocessing
-import os
 import pickle
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
-from htm_common import (
+from common.keystroke_features import (
     FOLDERS, DEFAULT_WINDOW_SIZE, DEFAULT_STEP_HUMAN, DEFAULT_STEP_BOT,
-    is_task1, create_reference_pool, process_file_worker, build_split,
+    is_task1, create_reference_pool, process_file_worker,
 )
+from htm_common import build_split
 
+# Output files are written relative to project root (CWD when running from there)
 SPLIT_FILE = "split.pkl"
 CACHE_FILE = "features_cache.pkl"
 
@@ -50,7 +59,7 @@ def main():
     print(f"  Bot files   : {len(bot_files)}")
 
     if not human_files:
-        print("ERROR: No human files found. Check FOLDERS paths in htm_common.py.")
+        print("ERROR: No human files found. Check FOLDERS paths in common/keystroke_features.py.")
         return
 
     # ---- 2. Build / load split ----
@@ -112,7 +121,7 @@ def main():
 
     print("\nDone. Ready to generate configs and submit SLURM jobs.")
     print("  Next steps:")
-    print("    python generate_configs.py")
+    print("    python htm/htm_generate_configs.py")
     print("    sbatch slurm/submit_array.sh")
 
 
