@@ -622,26 +622,23 @@ def main():
             title_prefix=f"{base_model_name} (all_non_train)"
         )
 
-    # ALL_OTHER_FILES MODE: recursively list pre-processing txt files, exclude orig splits by filename,
-    # then parse + feature-extract on the fly using the same logic as training.
-    # ALL_OTHER_FILES MODE: recursively list pre-processing txt files, exclude orig splits by filename,
-    # then parse + feature-extract on the fly using the same logic as training.
+    # ALL_OTHER_FILES MODE: evaluate raw txt files not in original splits (humans) + synthetic bot txt files.
     if args.mode == "all_other_files":
         print("\n" + "=" * 40)
-        print("Evaluating ALL OTHER RAW TXT FILES (pre-processing, excluding orig train/val/test by filename)")
+        print("Evaluating ALL OTHER RAW TXT FILES (pre-processing, excluding orig train/val/test by filename, plus synthetic bots)")
         print("=" * 40)
 
+        # ---------- OTHER HUMAN FILES ----------
         data_root_abs = os.path.abspath(args.data_root)
-        print(f"[1/4] Walking data_root={data_root_abs} ...")
+        print(f"[1/5] Walking data_root={data_root_abs} ...")
         all_fs_files = list_all_files_recursive(data_root_abs)
         print(f"    Total files found on filesystem: {len(all_fs_files)}")
 
-        # Only .txt files
-        print("[2/4] Filtering for .txt files...")
+        print("[2/5] Filtering for .txt files (other humans)...")
         txt_files = [p for p in all_fs_files if p.lower().endswith(".txt")]
         print(f"    .txt files found: {len(txt_files)}")
 
-        # Exclude original split filenames
+        # Exclude original split filenames (post-processed) by basename
         split_exclude_names = set(
             os.path.basename(f) for f in (
                 list(train_human) +
@@ -652,33 +649,60 @@ def main():
             )
         )
 
-        print("[3/4] Excluding original split filenames...")
-        txt_non_split = [
+        print("[3/5] Excluding original split filenames from other humans...")
+        txt_non_split_humans = [
             p for p in txt_files
             if os.path.basename(p) not in split_exclude_names
         ]
-        print(f"    .txt files after excluding original splits by filename: {len(txt_non_split)}")
+        print(f"    .txt human files after excluding original splits by filename: {len(txt_non_split_humans)}")
 
-        if not txt_non_split:
-            print("No candidate 'other' txt files after exclusions.")
+        # ---------- SYNTHETIC BOT FILES ----------
+        # Folder you mentioned: ../bots_synt_dataset/Synthetic_Bots/
+        # We treat all .txt there as synthetic bots.
+        synt_bots_root = os.path.abspath("../bots_synt_dataset/Synthetic_Bots")
+        print(f"[4/5] Walking synthetic bots root={synt_bots_root} ...")
+        if os.path.isdir(synt_bots_root):
+            synt_fs_files = list_all_files_recursive(synt_bots_root)
+            synt_txt_files = [p for p in synt_fs_files if p.lower().endswith(".txt")]
+            print(f"    Synthetic bot .txt files found: {len(synt_txt_files)}")
+        else:
+            synt_txt_files = []
+            print("    Synthetic bots directory not found; skipping synthetic bots.")
+
+        # Optional: also exclude any synthetic filenames that overlap original splits
+        synt_txt_non_split = [
+            p for p in synt_txt_files
+            if os.path.basename(p) not in split_exclude_names
+        ]
+        print(f"    Synthetic bot .txt files after excluding original splits by filename: {len(synt_txt_non_split)}")
+
+        # Combined candidates: other humans + synthetic bots
+        candidate_humans = txt_non_split_humans
+        candidate_bots = synt_txt_non_split
+
+        if not candidate_humans and not candidate_bots:
+            print("No candidate 'other' txt files (humans or synthetic bots) after exclusions.")
             return
 
-        # Build reference pool
-        print("[4/4] Building reference pool from train_human files...")
+        # ---------- Reference pool (from train_human) ----------
+        print("[5/5] Building reference pool from train_human files...")
         ref_dwells, ref_flights = create_reference_pool(train_human)
         print("    Reference pool built.")
 
-        # -------- Stage A: feature extraction (multiprocessing) --------
-        print("\n[Stage A] Computing feature sequences for 'other' txt files (multiprocessing)...")
+        # ---------- Stage A: feature extraction (multiprocessing) ----------
+        print("\n[Stage A] Computing feature sequences for 'other humans' and synthetic bots (multiprocessing)...")
 
-        worker_args = [
-            (p, ref_dwells, ref_flights, STEP_SIZE_HUMAN)
-            for p in txt_non_split
-        ]
+        worker_args = []
+        # humans use STEP_SIZE_HUMAN
+        for p in candidate_humans:
+            worker_args.append((p, ref_dwells, ref_flights, STEP_SIZE_HUMAN))
+        # bots can use STEP_SIZE_BOT if you want, or same as humans
+        for p in candidate_bots:
+            worker_args.append((p, ref_dwells, ref_flights, STEP_SIZE_BOT))
 
         other_feature_seqs = {}
         num_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", mp.cpu_count()))
-        print(f"Using {num_workers} worker processes.")
+        print(f"Using {num_workers} worker processes for feature extraction.")
 
         with mp.Pool(processes=num_workers) as pool:
             for filepath, seq in tqdm(
@@ -690,14 +714,14 @@ def main():
                 if seq.size > 0:
                     other_feature_seqs[filepath] = seq
 
-        print(f"    Other txt files with usable feature sequences: {len(other_feature_seqs)}")
+        print(f"    Other txt files (humans + synthetic bots) with usable feature sequences: {len(other_feature_seqs)}")
 
         if not other_feature_seqs:
             print("No usable 'other' txt files. Nothing to evaluate.")
             return
 
-        # -------- Stage B: inference --------
-        print("\n[Stage B] Running inference on 'other' files...")
+        # ---------- Stage B: inference ----------
+        print("\n[Stage B] Running inference on 'other humans' and synthetic bots...")
 
         sp = model_data['sp']
         tm = model_data['tm']
@@ -707,9 +731,12 @@ def main():
 
         scores = []
         labels = []
-        seqs = []
+        seqs_human = []
+        seqs_bot = []
 
-        is_bot_for_others = False  # or infer from folder names
+        # Convenience sets for label assignment
+        humans_set = set(candidate_humans)
+        bots_set = set(candidate_bots)
 
         for filepath, feats_seq in tqdm(other_feature_seqs.items(),
                                         desc="Inference",
@@ -728,15 +755,24 @@ def main():
 
             if file_scores:
                 valid_scores = file_scores[5:] if len(file_scores) > 5 else file_scores
-                scores.append(np.mean(valid_scores))
-                labels.append(1 if is_bot_for_others else 0)
-                seqs.append(file_scores)
+                mean_score = np.mean(valid_scores)
+
+                # Decide label based on origin: human (0) or synthetic bot (1)
+                if filepath in bots_set:
+                    label = 1  # Bot
+                    seqs_bot.append(file_scores)
+                else:
+                    label = 0  # Human
+                    seqs_human.append(file_scores)
+
+                scores.append(mean_score)
+                labels.append(label)
 
         if not scores:
             print("No scores produced for 'other' files.")
             return
 
-        # -------- Stage C: metrics + plots --------
+        # ---------- Stage C: metrics + plots ----------
         print("\n[Stage C] Computing metrics and plots...")
 
         other_f1 = eval_and_report(
@@ -745,13 +781,17 @@ def main():
             plot_prefix=f"{base_model_name}_all_other_files"
         )
 
+        # For the 3-panel plot, split by human/bot scores
+        human_scores = [s for s, l in zip(scores, labels) if l == 0]
+        bot_scores   = [s for s, l in zip(scores, labels) if l == 1]
+
         plot_results(
-            val_h_seqs=seqs,
-            val_b_seqs=[],
+            val_h_seqs=seqs_human,
+            val_b_seqs=seqs_bot,
             all_val_scores=scores,
             all_val_labels=labels,
-            val_h_scores=scores,
-            val_b_scores=[],
+            val_h_scores=human_scores,
+            val_b_scores=bot_scores,
             best_thresh=best_thresh,
             val_f1=other_f1,
             fname_slug=f"{base_model_name}_all_other_files",
