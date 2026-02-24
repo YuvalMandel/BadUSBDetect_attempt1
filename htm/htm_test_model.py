@@ -39,10 +39,17 @@ except ImportError:
     print("HTM libraries not found. Please install htm.core.")
     sys.exit(1)
 
+try:
+    from htm.bindings.algorithms import AnomalyLikelihood
+    _HAS_AL = True
+except ImportError:
+    _HAS_AL = False
+
 from common.keystroke_features import (
     RANDOM_SEED, DEFAULT_WINDOW_SIZE, NUM_REFERENCES,
     parse_file, extract_features, create_reference_pool,
 )
+from htm_common import WARMUP_STEPS, apply_detection
 
 # Match training step sizes
 WINDOW_SIZE     = DEFAULT_WINDOW_SIZE
@@ -91,10 +98,13 @@ def _compute_features_wrapper(args):
 # Inference
 # ------------------------------------------------------------------
 def run_inference(model_data, file_features, file_list, is_bot, desc="Inference",
-                  collect_seqs=False):
+                  use_al=False, al_period=20, effective_warmup=WARMUP_STEPS):
     """
     Run HTM inference on a list of files using cached feature sequences.
-    If collect_seqs=True, also returns per-file raw anomaly score sequences.
+    Returns (mean_scores, labels, raw_seqs):
+      mean_scores — post-warmup mean per file (used for histogram plots)
+      raw_seqs    — full per-window score sequences (used by apply_detection)
+    If use_al=True, scores are converted through AnomalyLikelihood (reset per file).
     """
     sp          = model_data['sp']
     tm          = model_data['tm']
@@ -109,26 +119,26 @@ def run_inference(model_data, file_features, file_list, is_bot, desc="Inference"
         if filepath not in file_features:
             continue
         tm.reset()
+        al = AnomalyLikelihood(learningPeriod=al_period) if (use_al and _HAS_AL) else None
         file_scores = []
-        for feats in file_features[filepath]:
+        for step, feats in enumerate(file_features[filepath]):
             dense_input = encoder.encode(feats)
             enc_sdr = SDR(input_width)
             enc_sdr.dense = dense_input
             sp.compute(enc_sdr, False, active_columns)
             tm.compute(active_columns, learn=False)
-            file_scores.append(tm.anomaly)
+            score = tm.anomaly
+            if al is not None:
+                score = al.anomalyProbability(score, score, step)
+            file_scores.append(score)
 
         if file_scores:
-            valid_scores = file_scores[5:] if len(file_scores) > 5 else file_scores
-            scores.append(np.mean(valid_scores))
+            valid = file_scores[effective_warmup:] if len(file_scores) > effective_warmup else file_scores
+            scores.append(float(np.mean(valid)) if valid else 0.0)
             labels.append(1 if is_bot else 0)
-            if collect_seqs:
-                seqs.append(file_scores)
+            seqs.append(file_scores)
 
-    if collect_seqs:
-        return scores, labels, seqs
-    else:
-        return scores, labels
+    return scores, labels, seqs
 
 
 # ------------------------------------------------------------------
@@ -136,14 +146,16 @@ def run_inference(model_data, file_features, file_list, is_bot, desc="Inference"
 # ------------------------------------------------------------------
 def plot_results(val_h_seqs, val_b_seqs,
                  all_val_scores, all_val_labels,
+                 all_val_seqs,
                  val_h_scores, val_b_scores,
                  best_thresh, val_f1,
-                 fname_slug, title_prefix=""):
+                 fname_slug, title_prefix="",
+                 detection_mode="mean", effective_warmup=WARMUP_STEPS):
     """
     3-panel plot:
       1) anomaly score over time for sample human/bot files
       2) per-file mean score distribution + threshold
-      3) F1 vs threshold curve, with best threshold marked
+      3) F1 vs threshold curve (using apply_detection for both modes)
     """
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     title = f"{title_prefix} Val F1={val_f1:.4f}"
@@ -157,6 +169,9 @@ def plot_results(val_h_seqs, val_b_seqs,
     for i in range(n):
         ax.plot(val_b_seqs[i], alpha=0.7, color='tomato',
                 label='Bot' if i == 0 else '_nolegend_')
+    if detection_mode == 'first_crossing':
+        ax.axhline(best_thresh, color='green', linestyle='--', linewidth=1.5,
+                   label=f'Cross-thresh={best_thresh:.3f}', alpha=0.8)
     ax.set_title('Anomaly Score Over Time\n(sample files)')
     ax.set_xlabel('Window index')
     ax.set_ylabel('Anomaly score')
@@ -179,7 +194,7 @@ def plot_results(val_h_seqs, val_b_seqs,
     ths = np.linspace(0, 1, 200)
     f1s = [
         f1_score(all_val_labels,
-                 [1 if s >= t else 0 for s in all_val_scores],
+                 apply_detection(all_val_seqs, detection_mode, t, effective_warmup),
                  zero_division=0)
         for t in ths
     ]
@@ -201,12 +216,17 @@ def plot_results(val_h_seqs, val_b_seqs,
 
 
 def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
-                    do_plot=False, plot_prefix=None):
+                    do_plot=False, plot_prefix=None,
+                    all_seqs=None, detection_mode="mean",
+                    effective_warmup=WARMUP_STEPS):
     """
     Compute metrics and print a classification report.
-    Handles single-class subsets gracefully (no shape errors).
+    Uses apply_detection when seqs are available; falls back to mean threshold otherwise.
     """
-    preds = [1 if s >= best_thresh else 0 for s in all_scores]
+    if all_seqs is not None:
+        preds = apply_detection(all_seqs, detection_mode, best_thresh, effective_warmup)
+    else:
+        preds = [1 if s >= best_thresh else 0 for s in all_scores]
 
     unique_labels = sorted(set(all_labels))
     label_names   = ['Human', 'Bot']
@@ -328,8 +348,21 @@ def main():
     print(f"Loading model from {args.model}...")
     with open(args.model, 'rb') as f:
         model_data = pickle.load(f)
-    best_thresh = model_data.get('best_thresh', 0.5)
-    print(f"Model loaded. Using threshold: {best_thresh:.4f}")
+
+    best_thresh      = model_data.get('best_thresh', 0.5)
+    detection_mode   = model_data.get('detection_mode', 'mean')
+    use_al           = model_data.get('use_anomaly_likelihood', False)
+    al_period        = model_data.get('al_learning_period', 20)
+    effective_warmup = model_data.get('effective_warmup',
+                                      max(WARMUP_STEPS, al_period) if use_al else WARMUP_STEPS)
+
+    if use_al and not _HAS_AL:
+        print("WARNING: AnomalyLikelihood not available; scores will differ from training.",
+              file=sys.stderr)
+        use_al = False
+
+    print(f"Model loaded. detection_mode={detection_mode}  use_al={use_al}  "
+          f"thresh={best_thresh:.4f}  warmup={effective_warmup}")
 
     base_model_name = os.path.splitext(os.path.basename(args.model))[0]
 
@@ -339,59 +372,71 @@ def main():
     val_bots    = split.get('val_bots', [])
     test_bots   = split.get('test_bots', [])
 
+    # Shared kwargs for run_inference
+    infer_kw = dict(use_al=use_al, al_period=al_period, effective_warmup=effective_warmup)
+
     # ------------------------------------------------------------------
     # MODE: orig
     # ------------------------------------------------------------------
     if args.mode == "orig" and not args.skip_orig_sets:
         val_h_scores, val_h_labels, val_h_seqs = run_inference(
             model_data, features_cache, val_human, False,
-            "Validation (Human)", collect_seqs=True
+            "Validation (Human)", **infer_kw
         )
         val_b_scores, val_b_labels, val_b_seqs = run_inference(
             model_data, features_cache, val_bots, True,
-            "Validation (Bot)", collect_seqs=True
+            "Validation (Bot)", **infer_kw
         )
         all_val_scores = val_h_scores + val_b_scores
         all_val_labels = val_h_labels + val_b_labels
+        all_val_seqs   = val_h_seqs   + val_b_seqs
 
-        test_h_scores, test_h_labels = run_inference(
-            model_data, features_cache, test_human, False, "Test (Human)"
+        test_h_scores, test_h_labels, test_h_seqs = run_inference(
+            model_data, features_cache, test_human, False, "Test (Human)", **infer_kw
         )
-        test_b_scores, test_b_labels = run_inference(
-            model_data, features_cache, test_bots, True, "Test (Bot)"
+        test_b_scores, test_b_labels, test_b_seqs = run_inference(
+            model_data, features_cache, test_bots, True, "Test (Bot)", **infer_kw
         )
         all_test_scores = test_h_scores + test_b_scores
         all_test_labels = test_h_labels + test_b_labels
+        all_test_seqs   = test_h_seqs   + test_b_seqs
 
         print("\n" + "=" * 40)
         print("RESULTS (Original Splits)")
         print("=" * 40)
 
+        eval_kw = dict(detection_mode=detection_mode, effective_warmup=effective_warmup)
+
         val_f1 = eval_and_report(
             all_val_scores, all_val_labels, best_thresh,
-            subset_name="Validation", do_plot=False
+            subset_name="Validation", do_plot=False,
+            all_seqs=all_val_seqs, **eval_kw
         )
         eval_and_report(
             all_test_scores, all_test_labels, best_thresh,
-            subset_name="Test", do_plot=False
+            subset_name="Test", do_plot=False,
+            all_seqs=all_test_seqs, **eval_kw
         )
 
         plot_results(
             val_h_seqs, val_b_seqs,
             all_val_scores, all_val_labels,
+            all_val_seqs,
             val_h_scores, val_b_scores,
             best_thresh, val_f1,
             fname_slug=f"{base_model_name}_orig",
-            title_prefix=f"{base_model_name} (orig)"
+            title_prefix=f"{base_model_name} (orig)",
+            detection_mode=detection_mode,
+            effective_warmup=effective_warmup,
         )
 
         print("Generating combined confusion matrices plot...")
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        for ax, (lbl, sc, title) in zip(axes, [
-            (all_val_labels,  all_val_scores,  "Validation Set"),
-            (all_test_labels, all_test_scores, "Test Set"),
+        for ax, (lbl, sc, seqs_set, title) in zip(axes, [
+            (all_val_labels,  all_val_scores,  all_val_seqs,  "Validation Set"),
+            (all_test_labels, all_test_scores, all_test_seqs, "Test Set"),
         ]):
-            preds = [1 if s >= best_thresh else 0 for s in sc]
+            preds = apply_detection(seqs_set, detection_mode, best_thresh, effective_warmup)
             f1    = f1_score(lbl, preds, zero_division=0)
             cm    = confusion_matrix(lbl, preds)
             sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax, cbar=False)
@@ -432,29 +477,36 @@ def main():
 
         nt_h_scores, nt_h_labels, nt_h_seqs = run_inference(
             model_data, features_cache, non_train_human_files, False,
-            "All Non-Train (Human)", collect_seqs=True
+            "All Non-Train (Human)", **infer_kw
         )
         nt_b_scores, nt_b_labels, nt_b_seqs = run_inference(
             model_data, features_cache, non_train_bot_files, True,
-            "All Non-Train (Bot)", collect_seqs=True
+            "All Non-Train (Bot)", **infer_kw
         )
 
         all_nt_scores = nt_h_scores + nt_b_scores
         all_nt_labels = nt_h_labels + nt_b_labels
+        all_nt_seqs   = nt_h_seqs   + nt_b_seqs
+
+        eval_kw = dict(detection_mode=detection_mode, effective_warmup=effective_warmup)
 
         nt_f1 = eval_and_report(
             all_nt_scores, all_nt_labels, best_thresh,
             subset_name="All Non-Train", do_plot=True,
-            plot_prefix=f"{base_model_name}_all_non_train"
+            plot_prefix=f"{base_model_name}_all_non_train",
+            all_seqs=all_nt_seqs, **eval_kw
         )
 
         plot_results(
             nt_h_seqs, nt_b_seqs,
             all_nt_scores, all_nt_labels,
+            all_nt_seqs,
             nt_h_scores, nt_b_scores,
             best_thresh, nt_f1,
             fname_slug=f"{base_model_name}_all_non_train",
-            title_prefix=f"{base_model_name} (all_non_train)"
+            title_prefix=f"{base_model_name} (all_non_train)",
+            detection_mode=detection_mode,
+            effective_warmup=effective_warmup,
         )
 
     # ------------------------------------------------------------------
@@ -547,6 +599,7 @@ def main():
         active_columns = SDR(sp.getColumnDimensions())
 
         scores, labels = [], []
+        raw_seqs = []
         seqs_human, seqs_bot = [], []
         humans_set = set(candidate_humans)
         bots_set   = set(candidate_bots)
@@ -554,17 +607,21 @@ def main():
         for filepath, feats_seq in tqdm(other_feature_seqs.items(),
                                         desc="Inference", unit="file"):
             tm.reset()
+            al = AnomalyLikelihood(learningPeriod=al_period) if (use_al and _HAS_AL) else None
             file_scores = []
-            for feats in feats_seq:
+            for step, feats in enumerate(feats_seq):
                 enc_sdr = SDR(input_width)
                 enc_sdr.dense = encoder.encode(feats)
                 sp.compute(enc_sdr, False, active_columns)
                 tm.compute(active_columns, learn=False)
-                file_scores.append(tm.anomaly)
+                score = tm.anomaly
+                if al is not None:
+                    score = al.anomalyProbability(score, score, step)
+                file_scores.append(score)
 
             if file_scores:
-                valid_scores = file_scores[5:] if len(file_scores) > 5 else file_scores
-                mean_score   = np.mean(valid_scores)
+                valid = file_scores[effective_warmup:] if len(file_scores) > effective_warmup else file_scores
+                mean_score = float(np.mean(valid)) if valid else 0.0
 
                 if filepath in bots_set:
                     labels.append(1)
@@ -574,6 +631,7 @@ def main():
                     seqs_human.append(file_scores)
 
                 scores.append(mean_score)
+                raw_seqs.append(file_scores)
 
         if not scores:
             print("No scores produced for 'other' files.")
@@ -581,10 +639,13 @@ def main():
 
         # ---------- Stage C: metrics + plots ----------
         print("\n[Stage C] Computing metrics and plots...")
+        eval_kw = dict(detection_mode=detection_mode, effective_warmup=effective_warmup)
+
         other_f1 = eval_and_report(
             scores, labels, best_thresh,
             subset_name="All Other Files", do_plot=True,
-            plot_prefix=f"{base_model_name}_all_other_files"
+            plot_prefix=f"{base_model_name}_all_other_files",
+            all_seqs=raw_seqs, **eval_kw
         )
 
         human_scores = [s for s, l in zip(scores, labels) if l == 0]
@@ -595,12 +656,15 @@ def main():
             val_b_seqs=seqs_bot,
             all_val_scores=scores,
             all_val_labels=labels,
+            all_val_seqs=raw_seqs,
             val_h_scores=human_scores,
             val_b_scores=bot_scores,
             best_thresh=best_thresh,
             val_f1=other_f1,
             fname_slug=f"{base_model_name}_all_other_files",
-            title_prefix=f"{base_model_name} (all_other_files)"
+            title_prefix=f"{base_model_name} (all_other_files)",
+            detection_mode=detection_mode,
+            effective_warmup=effective_warmup,
         )
 
 

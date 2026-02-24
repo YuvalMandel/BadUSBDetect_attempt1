@@ -99,3 +99,32 @@ def build_split(human_files, bot_files,
         'val_bots':    val_bots,
         'test_bots':   test_bots,
     }
+
+
+# ------------------------------------------------------------------
+# Detection helpers  (shared by htm_train_single and htm_test_model)
+# ------------------------------------------------------------------
+WARMUP_STEPS = 5
+
+
+def apply_detection(seqs, mode, thresh, warmup=WARMUP_STEPS):
+    """
+    Apply file-level detection to a list of per-window anomaly score sequences.
+    Returns a list of binary predictions (1=Bot, 0=Human).
+
+    mode='mean':
+        A file is Bot if mean(post-warmup scores) >= thresh.
+    mode='first_crossing':
+        A file is Bot if ANY post-warmup score >= thresh (first alarm).
+    """
+    preds = []
+    for seq in seqs:
+        post = seq[warmup:] if len(seq) > warmup else seq
+        if not post:
+            preds.append(0)
+            continue
+        if mode == 'first_crossing':
+            preds.append(1 if any(s >= thresh for s in post) else 0)
+        else:  # 'mean'
+            preds.append(1 if float(np.mean(post)) >= thresh else 0)
+    return preds

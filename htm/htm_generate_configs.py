@@ -40,6 +40,8 @@ PARAM_SPACE = {
     # Encoder
     "enc_bits_per_feature": [16, 32, 64],
     "enc_w":                [3,  5,  7],
+    # Detection strategy
+    "use_anomaly_likelihood": [False, True],
 }
 
 # config_0000 is always the "default" from htm_train_interactive.py
@@ -61,7 +63,11 @@ DEFAULT_CONFIG = {
     "tm_permanenceDecrement":0.10,
     "enc_bits_per_feature":  32,
     "enc_w":                 5,
-    "seed":                  42,
+    # Detection strategy defaults  (al_learning_period is fixed, not searched)
+    "detection_mode":         "first_crossing",
+    "use_anomaly_likelihood": False,
+    "al_learning_period":     20,
+    "seed":                   42,
 }
 
 
