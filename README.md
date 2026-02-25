@@ -188,18 +188,44 @@ python htm/htm_test_model.py --model models/<slug>.pkl --mode all_non_train
 | `--data_root` | `../UB_keystroke_dataset/` | Root to search for other human files (`all_other_files` mode) |
 | `--synthetic_bots_root` | `../bots_synt_dataset/Synthetic_Bots` | Root for synthetic bot files (`all_other_files` mode) |
 | `--skip_orig_sets` | off | Skip val/test evaluation in `orig` mode |
+| `--write_decision_log` | off | Write a per-window decision log for one human and one bot file |
 
-### Running on Newton SLURM (all_other_files mode)
+#### Decision logs (`--write_decision_log`)
 
-A dedicated Slurm script `slurm/test_htm_other.slurm` is provided:
+When enabled, two files are written to `logs/`:
+
+```
+logs/<model_name>_human_log.txt
+logs/<model_name>_bot_log.txt
+```
+
+Each file has one row per sliding window:
+
+```
+  Window     Score        Status  Reason
+--------  --------  ------------  ---------------------------------------------------
+       0    0.8321        WARMUP  warmup period (1/5)
+       5    0.3210   no crossing  score 0.3210 < threshold 0.4545
+       6    0.9812           BOT  first crossing: 0.9812 >= threshold 0.4545
+       7    0.7631           BOT  already triggered at window 6
+```
+
+The model always uses `first_crossing` mode:
+`WARMUP` → `no crossing` → `BOT` (once any post-warmup window crosses the threshold, all subsequent windows are marked `BOT`).
+
+### Running on Newton SLURM
+
+Use `run_test_model.sh` from the project root:
 
 ```bash
-sbatch slurm/test_htm_other.slurm
+sbatch run_test_model.sh
 ```
+
+Before submitting, edit the `MODEL=` line in `run_test_model.sh` to point at the `.pkl` you want to evaluate.
 
 Key settings in that script:
 ```bash
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=256
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00
 ```

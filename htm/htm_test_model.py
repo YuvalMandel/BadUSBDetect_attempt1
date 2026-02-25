@@ -158,7 +158,7 @@ def write_decision_log(filepath, features_seq, model_data, true_label, output_pa
     encoder        = model_data['encoder']
     input_width    = model_data['input_width']
     best_thresh    = model_data.get('best_thresh', 0.5)
-    detection_mode = model_data.get('detection_mode', 'mean')
+    detection_mode = model_data.get('detection_mode', 'first_crossing')
 
     active_columns   = SDR(sp.getColumnDimensions())
     tm.reset()
@@ -254,7 +254,7 @@ def plot_results(val_h_seqs, val_b_seqs,
                  val_h_scores, val_b_scores,
                  best_thresh, val_f1,
                  fname_slug, title_prefix="",
-                 detection_mode="mean", effective_warmup=WARMUP_STEPS):
+                 detection_mode="first_crossing", effective_warmup=WARMUP_STEPS):
     """
     3-panel plot:
       1) anomaly score over time for sample human/bot files
@@ -321,7 +321,7 @@ def plot_results(val_h_seqs, val_b_seqs,
 
 def eval_and_report(all_scores, all_labels, best_thresh, subset_name="Subset",
                     do_plot=False, plot_prefix=None,
-                    all_seqs=None, detection_mode="mean",
+                    all_seqs=None, detection_mode="first_crossing",
                     effective_warmup=WARMUP_STEPS):
     """
     Compute metrics and print a classification report.
@@ -459,7 +459,7 @@ def main():
         model_data = pickle.load(f)
 
     best_thresh      = model_data.get('best_thresh', 0.5)
-    detection_mode   = model_data.get('detection_mode', 'mean')
+    detection_mode   = model_data.get('detection_mode', 'first_crossing')
     use_al           = model_data.get('use_anomaly_likelihood', False)
     al_period        = model_data.get('al_learning_period', 20)
     effective_warmup = model_data.get('effective_warmup',

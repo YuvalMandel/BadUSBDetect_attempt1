@@ -67,7 +67,7 @@ for _d in (MODELS_DIR, PLOTS_DIR, RESULTS_DIR):
 # ------------------------------------------------------------------
 def _base_slug(cfg, config_idx):
     """Short, filesystem-safe key-param summary — no scores yet."""
-    mode_tag = "_fc" if cfg.get("detection_mode", "mean") == "first_crossing" else ""
+    mode_tag = "_fc" if cfg.get("detection_mode", "first_crossing") == "first_crossing" else ""
     al_tag   = "_al" if cfg.get("use_anomaly_likelihood", False) else ""
     return (
         f"cfg{config_idx:04d}"
@@ -84,7 +84,7 @@ def _full_slug(base, val_f1, test_f1):
 
 
 def _plot_title(cfg, config_idx, val_f1, test_f1):
-    mode_str = cfg.get("detection_mode", "mean")
+    mode_str = cfg.get("detection_mode", "first_crossing")
     al_str   = " AL" if cfg.get("use_anomaly_likelihood", False) else ""
     return (
         f"Config {config_idx:04d}  "
@@ -108,7 +108,7 @@ def plot_results(val_h_seqs, val_b_seqs,
                  val_h_scores, val_b_scores,
                  best_thresh, val_f1,
                  fname_slug, title,
-                 detection_mode="mean", effective_warmup=WARMUP_STEPS):
+                 detection_mode="first_crossing", effective_warmup=WARMUP_STEPS):
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     fig.suptitle(title, fontsize=7)
 
@@ -215,7 +215,7 @@ def main():
     np.random.seed(seed)
 
     # ---- Detection strategy ----
-    detection_mode = cfg.get("detection_mode", "mean")
+    detection_mode = cfg.get("detection_mode", "first_crossing")
     use_al         = cfg.get("use_anomaly_likelihood", False)
     al_period      = cfg.get("al_learning_period", 20)
 
