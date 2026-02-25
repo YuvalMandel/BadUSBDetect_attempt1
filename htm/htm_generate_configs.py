@@ -21,49 +21,54 @@ from pathlib import Path
 # ------------------------------------------------------------------
 PARAM_SPACE = {
     # SpatialPooler
+    # boost=0 was universal across all working configs; boost>0 correlated with failure
     "sp_columnDimensions":   [2048],
     "sp_numActiveColumns":   [20, 40, 80],
-    "sp_potentialPct":       [0.5, 0.7, 0.9],
-    "sp_boostStrength":      [0.0, 1.0, 2.0, 3.0],
+    "sp_potentialPct":       [0.5, 0.7],           # 0.9 never appeared in top results
+    "sp_boostStrength":      [0.0],                # fixed: boost>0 killed all tested configs
     "sp_synPermActiveInc":   [0.02, 0.05, 0.10],
     "sp_synPermConnected":   [0.10, 0.20],
     "sp_synPermInactiveDec": [0.003, 0.005, 0.010],
     # TemporalMemory
-    "tm_cellsPerColumn":      [16, 32, 64],
-    "tm_activationThreshold": [10, 13, 16, 20],
-    "tm_minThreshold":        [6,  8,  10, 12],
+    # cells=64 and act=10 never appeared in top results
+    # minThreshold=6,8 only in rank 3; top 2 both used 12
+    "tm_cellsPerColumn":      [16, 32],            # 64 never in top results
+    "tm_activationThreshold": [13, 16, 20],        # 10 never in top results
+    "tm_minThreshold":        [10, 12],            # 6,8 dropped; top 2 used 12
     "tm_maxNewSynapseCount":  [15, 20, 30],
     "tm_initialPermanence":   [0.21, 0.31, 0.40],
     "tm_connectedPermanence": [0.30, 0.50],
     "tm_permanenceIncrement": [0.05, 0.10, 0.20],
     "tm_permanenceDecrement": [0.03, 0.05, 0.10],
     # Encoder
-    "enc_bits_per_feature": [16, 32, 64],
-    "enc_w":                [3,  5,  7],
-    # Detection strategy
-    "use_anomaly_likelihood": [False, True],
+    # bits=64 never in top results; w=3 never in top results
+    "enc_bits_per_feature": [16, 32],              # 64 dropped
+    "enc_w":                [5, 7],                # 3 dropped
+    # Detection strategy — AL never helped in any tested config
+    "use_anomaly_likelihood": [False],             # fixed: True never in top results
 }
 
 # config_0000 is always the "default" from htm_train_interactive.py
 DEFAULT_CONFIG = {
+    # Best known config (cfg0050: val F1=0.60, test F1=0.6875)
     "sp_columnDimensions":   2048,
-    "sp_numActiveColumns":   40,
-    "sp_potentialPct":       0.8,
-    "sp_boostStrength":      1.0,
+    "sp_numActiveColumns":   20,
+    "sp_potentialPct":       0.7,
+    "sp_boostStrength":      0.0,
     "sp_synPermActiveInc":   0.05,
     "sp_synPermConnected":   0.10,
     "sp_synPermInactiveDec": 0.005,
-    "tm_cellsPerColumn":     32,
-    "tm_activationThreshold":13,
-    "tm_minThreshold":       10,
+    "tm_cellsPerColumn":     16,
+    "tm_activationThreshold":16,
+    "tm_minThreshold":       12,
     "tm_maxNewSynapseCount": 20,
     "tm_initialPermanence":  0.21,
     "tm_connectedPermanence":0.50,
     "tm_permanenceIncrement":0.10,
     "tm_permanenceDecrement":0.10,
-    "enc_bits_per_feature":  32,
-    "enc_w":                 5,
-    # Detection strategy defaults  (al_learning_period is fixed, not searched)
+    "enc_bits_per_feature":  16,
+    "enc_w":                 7,
+    # Detection strategy (al_learning_period is fixed, not searched)
     "detection_mode":         "first_crossing",
     "use_anomaly_likelihood": False,
     "al_learning_period":     20,
