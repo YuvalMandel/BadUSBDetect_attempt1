@@ -61,6 +61,8 @@ STEP_SIZE_BOT   = 1
 # ------------------------------------------------------------------
 PLOTS_DIR = "plots"
 os.makedirs(PLOTS_DIR, exist_ok=True)
+LOGS_DIR = "logs"
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 
 # ------------------------------------------------------------------
@@ -139,6 +141,108 @@ def run_inference(model_data, file_features, file_list, is_bot, desc="Inference"
             seqs.append(file_scores)
 
     return scores, labels, seqs
+
+
+# ------------------------------------------------------------------
+# Decision log
+# ------------------------------------------------------------------
+def write_decision_log(filepath, features_seq, model_data, true_label, output_path,
+                       use_al=False, al_period=20, effective_warmup=WARMUP_STEPS):
+    """
+    Run inference on a single file and write a per-window decision log.
+    Each line records: window index, anomaly score, status, and the reason
+    behind the status (warmup, score vs. threshold, running mean, etc.).
+    """
+    sp             = model_data['sp']
+    tm             = model_data['tm']
+    encoder        = model_data['encoder']
+    input_width    = model_data['input_width']
+    best_thresh    = model_data.get('best_thresh', 0.5)
+    detection_mode = model_data.get('detection_mode', 'mean')
+
+    active_columns   = SDR(sp.getColumnDimensions())
+    tm.reset()
+    al = AnomalyLikelihood(learningPeriod=al_period) if (use_al and _HAS_AL) else None
+
+    window_scores    = []
+    rows             = []
+    bot_triggered_at = None   # only used in first_crossing mode
+
+    n_windows = len(features_seq)
+
+    for step, feats in enumerate(features_seq):
+        enc_sdr       = SDR(input_width)
+        enc_sdr.dense = encoder.encode(feats)
+        sp.compute(enc_sdr, False, active_columns)
+        tm.compute(active_columns, learn=False)
+        score = tm.anomaly
+        if al is not None:
+            score = al.anomalyProbability(score, score, step)
+
+        window_scores.append(score)
+
+        # ---- per-window status + reason ----
+        if step < effective_warmup:
+            status = "WARMUP"
+            reason = f"warmup period ({step + 1}/{effective_warmup})"
+
+        elif detection_mode == 'first_crossing':
+            if bot_triggered_at is not None:
+                status = "BOT"
+                reason = f"already triggered at window {bot_triggered_at}"
+            elif score >= best_thresh:
+                bot_triggered_at = step
+                status = "BOT"
+                reason = f"first crossing: {score:.4f} >= threshold {best_thresh:.4f}"
+            else:
+                status = "no crossing"
+                reason = f"score {score:.4f} < threshold {best_thresh:.4f}"
+
+        else:  # mean mode
+            post_so_far  = window_scores[effective_warmup:]
+            running_mean = float(np.mean(post_so_far)) if post_so_far else 0.0
+            is_last      = (step == n_windows - 1)
+            cmp_str      = ">=" if running_mean >= best_thresh else "<"
+            if is_last:
+                if running_mean >= best_thresh:
+                    status = "BOT"
+                    reason = f"final mean {running_mean:.4f} >= threshold {best_thresh:.4f}"
+                else:
+                    status = "HUMAN"
+                    reason = f"final mean {running_mean:.4f} < threshold {best_thresh:.4f}"
+            else:
+                status = "pending"
+                reason = (f"running mean {running_mean:.4f} {cmp_str} "
+                          f"threshold {best_thresh:.4f}")
+
+        rows.append((step, score, status, reason))
+
+    # ---- file-level verdict ----
+    post = window_scores[effective_warmup:] if len(window_scores) > effective_warmup else window_scores
+    if detection_mode == 'first_crossing':
+        final_pred = 1 if bot_triggered_at is not None else 0
+    else:
+        final_pred = 1 if (post and float(np.mean(post)) >= best_thresh) else 0
+
+    final_str  = "BOT"     if final_pred  == 1 else "HUMAN"
+    true_str   = "BOT"     if true_label  == 1 else "HUMAN"
+    verdict    = "CORRECT" if final_pred  == true_label else "WRONG"
+
+    with open(output_path, 'w') as fh:
+        fh.write(f"# File:           {filepath}\n")
+        fh.write(f"# True label:     {true_str}\n")
+        fh.write(f"# Final decision: {final_str}  [{verdict}]\n")
+        fh.write(f"# Detection mode: {detection_mode}\n")
+        fh.write(f"# Threshold:      {best_thresh:.4f}\n")
+        fh.write(f"# Warmup steps:   {effective_warmup}\n")
+        fh.write(f"# Total windows:  {n_windows}\n")
+        fh.write("#\n")
+        fh.write(f"{'Window':>8}  {'Score':>8}  {'Status':>14}  Reason\n")
+        fh.write(f"{'-'*8}  {'-'*8}  {'-'*14}  {'-'*55}\n")
+        for widx, sc, st, rs in rows:
+            fh.write(f"{widx:>8}  {sc:>8.4f}  {st:>14}  {rs}\n")
+
+    print(f"  Decision log → {output_path}")
 
 
 # ------------------------------------------------------------------
@@ -328,6 +432,11 @@ def main():
         action="store_true",
         help="If set, skip evaluation of original val/test sets (only relevant for mode=orig)."
     )
+    parser.add_argument(
+        "--write_decision_log",
+        action="store_true",
+        help="Write a per-window decision log for one human file and one bot file."
+    )
 
     args = parser.parse_args()
 
@@ -450,6 +559,19 @@ def main():
         plt.close()
         print(f"Original splits confusion plot saved to {orig_plot_path}")
 
+        if args.write_decision_log:
+            log_kw = dict(use_al=use_al, al_period=al_period, effective_warmup=effective_warmup)
+            log_human = next((f for f in val_human  if f in features_cache), None)
+            log_bot   = next((f for f in val_bots   if f in features_cache), None)
+            if log_human:
+                write_decision_log(log_human, features_cache[log_human], model_data, 0,
+                                   os.path.join(LOGS_DIR, f"{base_model_name}_human_log.txt"),
+                                   **log_kw)
+            if log_bot:
+                write_decision_log(log_bot, features_cache[log_bot], model_data, 1,
+                                   os.path.join(LOGS_DIR, f"{base_model_name}_bot_log.txt"),
+                                   **log_kw)
+
     # ------------------------------------------------------------------
     # MODE: all_non_train
     # ------------------------------------------------------------------
@@ -508,6 +630,19 @@ def main():
             detection_mode=detection_mode,
             effective_warmup=effective_warmup,
         )
+
+        if args.write_decision_log:
+            log_kw = dict(use_al=use_al, al_period=al_period, effective_warmup=effective_warmup)
+            log_human = next((f for f in non_train_human_files if f in features_cache), None)
+            log_bot   = next((f for f in non_train_bot_files   if f in features_cache), None)
+            if log_human:
+                write_decision_log(log_human, features_cache[log_human], model_data, 0,
+                                   os.path.join(LOGS_DIR, f"{base_model_name}_human_log.txt"),
+                                   **log_kw)
+            if log_bot:
+                write_decision_log(log_bot, features_cache[log_bot], model_data, 1,
+                                   os.path.join(LOGS_DIR, f"{base_model_name}_bot_log.txt"),
+                                   **log_kw)
 
     # ------------------------------------------------------------------
     # MODE: all_other_files
@@ -666,6 +801,21 @@ def main():
             detection_mode=detection_mode,
             effective_warmup=effective_warmup,
         )
+
+        if args.write_decision_log:
+            log_kw = dict(use_al=use_al, al_period=al_period, effective_warmup=effective_warmup)
+            log_human = next(
+                (f for f in candidate_humans if f in other_feature_seqs), None)
+            log_bot   = next(
+                (f for f in candidate_bots   if f in other_feature_seqs), None)
+            if log_human:
+                write_decision_log(log_human, other_feature_seqs[log_human], model_data, 0,
+                                   os.path.join(LOGS_DIR, f"{base_model_name}_human_log.txt"),
+                                   **log_kw)
+            if log_bot:
+                write_decision_log(log_bot, other_feature_seqs[log_bot], model_data, 1,
+                                   os.path.join(LOGS_DIR, f"{base_model_name}_bot_log.txt"),
+                                   **log_kw)
 
 
 if __name__ == "__main__":
