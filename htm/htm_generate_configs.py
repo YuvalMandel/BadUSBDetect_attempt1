@@ -21,46 +21,50 @@ from pathlib import Path
 # ------------------------------------------------------------------
 PARAM_SPACE = {
     # SpatialPooler
-    # boost=0 was universal across all working configs; boost>0 correlated with failure
+    # boost=0 confirmed fixed across both search rounds
+    # sp_act=40 and 80 tied (4 each in top 8); added 60 as midpoint
+    # pct=0.5 and 0.7 tied (4 each in top 8); added 0.6 as midpoint
     "sp_columnDimensions":   [2048],
-    "sp_numActiveColumns":   [20, 40, 80],
-    "sp_potentialPct":       [0.5, 0.7],           # 0.9 never appeared in top results
+    "sp_numActiveColumns":   [20, 40, 60, 80],     # added 60 (gap between 40 and 80)
+    "sp_potentialPct":       [0.5, 0.6, 0.7],      # added 0.6
     "sp_boostStrength":      [0.0],                # fixed: boost>0 killed all tested configs
     "sp_synPermActiveInc":   [0.02, 0.05, 0.10],
     "sp_synPermConnected":   [0.10, 0.20],
     "sp_synPermInactiveDec": [0.003, 0.005, 0.010],
     # TemporalMemory
-    # cells=64 and act=10 never appeared in top results
-    # minThreshold=6,8 only in rank 3; top 2 both used 12
-    "tm_cellsPerColumn":      [16, 32],            # 64 never in top results
-    "tm_activationThreshold": [13, 16, 20],        # 10 never in top results
-    "tm_minThreshold":        [10, 12],            # 6,8 dropped; top 2 used 12
+    # tm=32 appeared in 7/8 top configs; keep 16 as alternative
+    # act=13, 16, 20 all appeared; added 15 and 17 to fill gaps
+    # min=10 appeared in 6/8 top configs; added 11 between 10 and 12
+    "tm_cellsPerColumn":      [16, 32],
+    "tm_activationThreshold": [13, 15, 17, 20],   # added 15, 17 (midpoints)
+    "tm_minThreshold":        [10, 11, 12],        # added 11
     "tm_maxNewSynapseCount":  [15, 20, 30],
     "tm_initialPermanence":   [0.21, 0.31, 0.40],
     "tm_connectedPermanence": [0.30, 0.50],
     "tm_permanenceIncrement": [0.05, 0.10, 0.20],
     "tm_permanenceDecrement": [0.03, 0.05, 0.10],
     # Encoder
-    # bits=64 never in top results; w=3 never in top results
-    "enc_bits_per_feature": [16, 32],              # 64 dropped
-    "enc_w":                [5, 7],                # 3 dropped
-    # Detection strategy — AL never helped in any tested config
-    "use_anomaly_likelihood": [False],             # fixed: True never in top results
+    # enc=16 appeared in 7/8 top configs; w=7 appeared in 7/8 top configs
+    # added w=6 as midpoint between 5 and 7
+    "enc_bits_per_feature": [16, 32],
+    "enc_w":                [5, 6, 7],             # added 6
+    # Detection strategy — AL never helped; fixed to False
+    "use_anomaly_likelihood": [False],
 }
 
 # config_0000 is always the "default" from htm_train_interactive.py
 DEFAULT_CONFIG = {
-    # Best known config (cfg0050: val F1=0.60, test F1=0.6875)
+    # Best known config (cfg0005: val F1=0.75, test F1=0.6207)
     "sp_columnDimensions":   2048,
-    "sp_numActiveColumns":   20,
+    "sp_numActiveColumns":   80,
     "sp_potentialPct":       0.7,
     "sp_boostStrength":      0.0,
     "sp_synPermActiveInc":   0.05,
     "sp_synPermConnected":   0.10,
     "sp_synPermInactiveDec": 0.005,
-    "tm_cellsPerColumn":     16,
-    "tm_activationThreshold":16,
-    "tm_minThreshold":       12,
+    "tm_cellsPerColumn":     32,
+    "tm_activationThreshold":20,
+    "tm_minThreshold":       10,
     "tm_maxNewSynapseCount": 20,
     "tm_initialPermanence":  0.21,
     "tm_connectedPermanence":0.50,
