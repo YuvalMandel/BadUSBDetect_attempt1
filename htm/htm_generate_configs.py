@@ -21,61 +21,64 @@ from pathlib import Path
 # ------------------------------------------------------------------
 PARAM_SPACE = {
     # SpatialPooler
-    # boost=0 confirmed fixed across both search rounds
-    # sp_act=40 and 80 tied (4 each in top 8); added 60 as midpoint
-    # pct=0.5 and 0.7 tied (4 each in top 8); added 0.6 as midpoint
+    # Round 3 (128 runs): sp_act=20 in ranks 1,2,4; 40 rank 3; 60/80 rank 5+
+    # removed 80 (never top-4); added 15,30 as intermediates in winning 20-40 range
+    # pct=0.7 in 3/5 top configs; 0.5 in 2/5; added 0.75 to probe above 0.7
+    # boost=0 confirmed fixed across all 128 runs
     "sp_columnDimensions":   [2048],
-    "sp_numActiveColumns":   [20, 40, 60, 80],     # added 60 (gap between 40 and 80)
-    "sp_potentialPct":       [0.5, 0.6, 0.7],      # added 0.6
+    "sp_numActiveColumns":   [10, 15, 20, 30, 40],  # removed 60,80 (ranks 5+); added 15,30 as intermediates
+    "sp_potentialPct":       [0.5, 0.6, 0.7, 0.75], # added 0.75 (0.7 dominant in top-5: 3/5)
     "sp_boostStrength":      [0.0],                # fixed: boost>0 killed all tested configs
     "sp_synPermActiveInc":   [0.02, 0.05, 0.10],
     "sp_synPermConnected":   [0.10, 0.20],
     "sp_synPermInactiveDec": [0.003, 0.005, 0.010],
     # TemporalMemory
-    # tm=32 appeared in 7/8 top configs; keep 16 as alternative
-    # act=13, 16, 20 all appeared; added 15 and 17 to fill gaps
-    # min=10 appeared in 6/8 top configs; added 11 between 10 and 12
-    "tm_cellsPerColumn":      [16, 32],
-    "tm_activationThreshold": [13, 15, 17, 20],   # added 15, 17 (midpoints)
-    "tm_minThreshold":        [10, 11, 12],        # added 11
+    # Round 3: tm=16 in top-5 (3/5); 32 viable (2/5); 8 untested exploratory
+    # act=15 best (3/5 top), act=20 rank 1, act=13 rank 5; added 18 as intermediate
+    # min=11 dominant (3/5 top, 10/20 overall)
+    "tm_cellsPerColumn":      [8, 16, 32],            # 16 dominant (3/5 top); 8 untested
+    "tm_activationThreshold": [13, 14, 15, 18, 20],  # added 18 between 15 (ranks 2-4) and 20 (rank 1)
+    "tm_minThreshold":        [10, 11, 12],           # 11 dominant (3/5 top)
     "tm_maxNewSynapseCount":  [15, 20, 30],
     "tm_initialPermanence":   [0.21, 0.31, 0.40],
     "tm_connectedPermanence": [0.30, 0.50],
     "tm_permanenceIncrement": [0.05, 0.10, 0.20],
     "tm_permanenceDecrement": [0.03, 0.05, 0.10],
     # Encoder
-    # enc=16 appeared in 7/8 top configs; w=7 appeared in 7/8 top configs
-    # added w=6 as midpoint between 5 and 7
+    # Round 3: enc=16 dominates (18/20 top); w=7 best in top-5 (3/5), w=5 rank 1; w=4 untested
     "enc_bits_per_feature": [16, 32],
-    "enc_w":                [5, 6, 7],             # added 6
+    "enc_w":                [4, 5, 6, 7],
     # Detection strategy — AL never helped; fixed to False
     "use_anomaly_likelihood": [False],
+    # Warmup: initial windows skipped before any alarm can fire (first_crossing sensitive to this)
+    "warmup_steps": [3, 5, 8, 12, 20],
 }
 
 # config_0000 is always the "default" from htm_train_interactive.py
 DEFAULT_CONFIG = {
-    # Best known config (cfg0005: val F1=0.75, test F1=0.6207)
+    # Best known config (cfg0075: val F1=0.375, test F1=0.7429)
     "sp_columnDimensions":   2048,
-    "sp_numActiveColumns":   80,
-    "sp_potentialPct":       0.7,
+    "sp_numActiveColumns":   20,
+    "sp_potentialPct":       0.5,
     "sp_boostStrength":      0.0,
     "sp_synPermActiveInc":   0.05,
     "sp_synPermConnected":   0.10,
     "sp_synPermInactiveDec": 0.005,
-    "tm_cellsPerColumn":     32,
+    "tm_cellsPerColumn":     16,
     "tm_activationThreshold":20,
-    "tm_minThreshold":       10,
+    "tm_minThreshold":       11,
     "tm_maxNewSynapseCount": 20,
     "tm_initialPermanence":  0.21,
     "tm_connectedPermanence":0.50,
     "tm_permanenceIncrement":0.10,
     "tm_permanenceDecrement":0.10,
     "enc_bits_per_feature":  16,
-    "enc_w":                 7,
+    "enc_w":                 5,
     # Detection strategy (al_learning_period is fixed, not searched)
     "detection_mode":         "first_crossing",
     "use_anomaly_likelihood": False,
     "al_learning_period":     20,
+    "warmup_steps":           5,
     "seed":                   42,
 }
 
@@ -118,7 +121,7 @@ def write_slurm_script(n_configs, out_path):
 #SBATCH --job-name=htm_search
 #SBATCH --output=logs/slurm_%A_%a.out
 #SBATCH --error=logs/slurm_%A_%a.err
-#SBATCH --array=0-{n_configs - 1}
+#SBATCH --array=0-{n_configs - 1}%200  # max 200 concurrent tasks (stays under 300-CPU QOS limit)
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
 #SBATCH --time=01:30:00

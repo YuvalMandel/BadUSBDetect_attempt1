@@ -307,26 +307,31 @@ To change dataset paths, edit `FOLDERS` in `common/keystroke_features.py`.
 
 ## Hyperparameter search space (HTM)
 
-The search varies the following parameters (all others are fixed):
+The search varies the following parameters. Fixed parameters (`boostStrength`,
+`use_anomaly_likelihood`) were eliminated by empirical evidence across search rounds.
 
-| Group | Parameter | Values searched |
-|-------|-----------|-----------------|
-| SP | `numActiveColumns` | 20, 40, 80 |
-| SP | `potentialPct` | 0.5, 0.7, 0.9 |
-| SP | `boostStrength` | 0, 1, 2, 3 |
-| SP | `synPermActiveInc` | 0.02, 0.05, 0.10 |
-| SP | `synPermConnected` | 0.10, 0.20 |
-| SP | `synPermInactiveDec` | 0.003, 0.005, 0.010 |
-| TM | `cellsPerColumn` | 16, 32, 64 |
-| TM | `activationThreshold` | 10, 13, 16, 20 |
-| TM | `minThreshold` | 6, 8, 10, 12 |
-| TM | `maxNewSynapseCount` | 15, 20, 30 |
-| TM | `initialPermanence` | 0.21, 0.31, 0.40 |
-| TM | `connectedPermanence` | 0.30, 0.50 |
-| TM | `permanenceIncrement` | 0.05, 0.10, 0.20 |
-| TM | `permanenceDecrement` | 0.03, 0.05, 0.10 |
-| Enc | `bits_per_feature` | 16, 32, 64 |
-| Enc | `w` (active bits) | 3, 5, 7 |
+| Group | Parameter | Values searched | Notes |
+|-------|-----------|-----------------|-------|
+| SP | `numActiveColumns` | 10, **15**, 20, **30**, 40 | 60,80 dropped round 5 (ranks 5+); 15,30 added round 5 |
+| SP | `potentialPct` | 0.5, 0.6, 0.7, **0.75** | 0.75 added round 5 (0.7 dominant in top-5: 3/5) |
+| SP | `boostStrength` | ~~0, 1, 2, 3~~ → **fixed 0** | boost>0 killed all configs round 1 |
+| SP | `synPermActiveInc` | 0.02, 0.05, 0.10 | |
+| SP | `synPermConnected` | 0.10, 0.20 | |
+| SP | `synPermInactiveDec` | 0.003, 0.005, 0.010 | |
+| TM | `cellsPerColumn` | 8, 16, 32 | 16 dominant (3/5 top); 8 untested exploratory; 64 dropped round 2 |
+| TM | `activationThreshold` | 13, 14, 15, **18**, 20 | 18 added round 5 (between 15 in ranks 2-4 and 20 in rank 1) |
+| TM | `minThreshold` | 10, 11, 12 | 11 dominant (3/5 top); 6,8 dropped round 2 |
+| TM | `maxNewSynapseCount` | 15, 20, 30 | |
+| TM | `initialPermanence` | 0.21, 0.31, 0.40 | |
+| TM | `connectedPermanence` | 0.30, 0.50 | |
+| TM | `permanenceIncrement` | 0.05, 0.10, 0.20 | |
+| TM | `permanenceDecrement` | 0.03, 0.05, 0.10 | |
+| Enc | `bits_per_feature` | 16, 32 | 64 dropped round 2; enc=16 in 18/20 top configs |
+| Enc | `w` (active bits) | 4, 5, 6, 7 | w=7 best in top-5 (3/5); w=5 rank 1; w=4 untested |
+| Det | `use_anomaly_likelihood` | ~~True, False~~ → **fixed False** | AL never helped in any run |
+| Det | `warmup_steps` | **3, 5, 8, 12, 20** | **New round 5** — initial windows skipped before alarm can fire |
 
-`config_0000.json` always contains the original default values from `htm_train_interactive.py`
-and serves as the baseline for comparison.
+**Bold** = added in the current round. ~~Strikethrough~~ = eliminated by evidence.
+
+`config_0000.json` is always set to the best config found so far (currently cfg0075:
+sp_act=20, pct=0.5, enc=16w5, tm=16, act=20, min=11, warmup=5 → test F1=0.7429).

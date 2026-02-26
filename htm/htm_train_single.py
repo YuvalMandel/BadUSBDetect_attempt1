@@ -224,7 +224,7 @@ def main():
               "falling back to raw anomaly scores.", file=sys.stderr)
         use_al = False
 
-    effective_warmup = max(WARMUP_STEPS, al_period) if use_al else WARMUP_STEPS
+    effective_warmup = max(cfg.get("warmup_steps", WARMUP_STEPS), al_period) if use_al else cfg.get("warmup_steps", WARMUP_STEPS)
 
     print(f"\n{'='*60}")
     print(f"  HTM Config {config_idx:04d}   (seed={seed})")
