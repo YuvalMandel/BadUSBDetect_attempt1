@@ -25,7 +25,7 @@ export NUMEXPR_NUM_THREADS=$SLURM_CPUS_PER_TASK
 echo "Running on $SLURM_CPUS_PER_TASK CPUs"
 
 python htm/htm_test_model.py \
-    --model  models/cfg0025_sp20_enc16w3_tm32_act20_al_vf11.0000_tf11.0000.pkl \
+    --model  models/cfg0140_sp45_enc16w5_tm8_act18_fc_vf10.4706_tf10.8333.pkl \
     --mode all_other_files \
     --data_root ../UB_keystroke_dataset/ \
     --write_decision_log
