@@ -1,0 +1,22 @@
+{
+  "sp_columnDimensions": 2048,
+  "sp_numActiveColumns": 20,
+  "sp_potentialPct": 0.6,
+  "sp_boostStrength": 0.0,
+  "sp_synPermActiveInc": 0.02,
+  "sp_synPermConnected": 0.2,
+  "sp_synPermInactiveDec": 0.005,
+  "tm_cellsPerColumn": 32,
+  "tm_activationThreshold": 18,
+  "tm_minThreshold": 10,
+  "tm_maxNewSynapseCount": 20,
+  "tm_initialPermanence": 0.21,
+  "tm_connectedPermanence": 0.3,
+  "tm_permanenceIncrement": 0.1,
+  "tm_permanenceDecrement": 0.1,
+  "enc_bits_per_feature": 16,
+  "enc_w": 5,
+  "use_anomaly_likelihood": false,
+  "warmup_steps": 5,
+  "seed": 29197
+}
