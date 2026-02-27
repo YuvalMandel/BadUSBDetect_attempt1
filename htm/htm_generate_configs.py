@@ -2,71 +2,90 @@
 htm/htm_generate_configs.py
 Generate random HTM hyperparameter configurations and the SLURM submission script.
 
+Cumulative workflow — results are NEVER deleted:
+  Each run finds the highest config_idx already present in results/,
+  deletes old (already-run) configs/config_*.json files, then writes
+  new configs numbered from last_idx + 1 onward.
+
 Usage:
-  python htm/htm_generate_configs.py [--n-configs 64] [--seed 0]
+  python htm/htm_generate_configs.py [--n-configs 128] [--seed 0]
 
 Outputs (relative to project root):
-  configs/config_0000.json … configs/config_NNNN.json
+  configs/config_NNNN.json … (N new configs, starting after last completed)
   slurm/submit_array.sh
 """
 
 import argparse
+import glob
 import json
 import os
 import random
 from pathlib import Path
 
 # ------------------------------------------------------------------
-# Search space
+# Search space — Round 6 (after 254 runs)
+#
+# Eliminated by evidence across all rounds:
+#   enc_bits=32   — never appeared in top-6
+#   tm_cells=32   — never appeared in top-6
+#   sp_act=10,15  — never appeared in top-6
+#   enc_w=4       — never appeared in top-6
+#   boost>0       — killed all configs in round 1
+#   AL=True       — never helped
+#
+# Hot zone from top-6 analysis:
+#   sp_act: 20 (ranks 2,5), 30 (rank 4), 40 (ranks 1,3,6) → add 25,35,45
+#   pct:    0.7 (3/6), 0.75 (1/6), 0.6 (1/6), 0.5 (1/6) → add 0.65, 0.80
+#   enc_w:  5 (2/6), 6 (2/6), 7 (1/6)
+#   tm_cells: 16 (3/6), 8 (3/6) — both viable
+#   act:    13 (2/6), 14,15,18,20 (1/6 each) — full range valid
+#   min:    10 (4/6), 12 (1/6) — 10 dominant
 # ------------------------------------------------------------------
 PARAM_SPACE = {
     # SpatialPooler
-    # Round 3 (128 runs): sp_act=20 in ranks 1,2,4; 40 rank 3; 60/80 rank 5+
-    # removed 80 (never top-4); added 15,30 as intermediates in winning 20-40 range
-    # pct=0.7 in 3/5 top configs; 0.5 in 2/5; added 0.75 to probe above 0.7
-    # boost=0 confirmed fixed across all 128 runs
     "sp_columnDimensions":   [2048],
-    "sp_numActiveColumns":   [10, 15, 20, 30, 40],  # removed 60,80 (ranks 5+); added 15,30 as intermediates
-    "sp_potentialPct":       [0.5, 0.6, 0.7, 0.75], # added 0.75 (0.7 dominant in top-5: 3/5)
-    "sp_boostStrength":      [0.0],                # fixed: boost>0 killed all tested configs
+    # Round 6: removed 10,15 (never top-6); added 25,35,45 to probe around hot zone 30-40
+    "sp_numActiveColumns":   [20, 25, 30, 35, 40, 45],
+    # Round 6: added 0.65,0.80 to bracket the 0.7-0.75 sweet spot
+    "sp_potentialPct":       [0.5, 0.60, 0.65, 0.70, 0.75, 0.80],
+    "sp_boostStrength":      [0.0],                # fixed: boost>0 kills learning
     "sp_synPermActiveInc":   [0.02, 0.05, 0.10],
-    "sp_synPermConnected":   [0.10, 0.20],
+    # Round 6: added 0.15 between 0.10 and 0.20
+    "sp_synPermConnected":   [0.10, 0.15, 0.20],
     "sp_synPermInactiveDec": [0.003, 0.005, 0.010],
     # TemporalMemory
-    # Round 3: tm=16 in top-5 (3/5); 32 viable (2/5); 8 untested exploratory
-    # act=15 best (3/5 top), act=20 rank 1, act=13 rank 5; added 18 as intermediate
-    # min=11 dominant (3/5 top, 10/20 overall)
-    "tm_cellsPerColumn":      [8, 16, 32],            # 16 dominant (3/5 top); 8 untested
-    "tm_activationThreshold": [13, 14, 15, 18, 20],  # added 18 between 15 (ranks 2-4) and 20 (rank 1)
-    "tm_minThreshold":        [10, 11, 12],           # 11 dominant (3/5 top)
-    "tm_maxNewSynapseCount":  [15, 20, 30],
+    # Round 6: removed 32 (never top-6); 8 and 16 both appear in top-6
+    "tm_cellsPerColumn":      [8, 16],
+    "tm_activationThreshold": [13, 14, 15, 18, 20],
+    "tm_minThreshold":        [10, 11, 12],
+    # Round 6: added 25 to probe between 20 and 30
+    "tm_maxNewSynapseCount":  [15, 20, 25, 30],
     "tm_initialPermanence":   [0.21, 0.31, 0.40],
     "tm_connectedPermanence": [0.30, 0.50],
     "tm_permanenceIncrement": [0.05, 0.10, 0.20],
     "tm_permanenceDecrement": [0.03, 0.05, 0.10],
     # Encoder
-    # Round 3: enc=16 dominates (18/20 top); w=7 best in top-5 (3/5), w=5 rank 1; w=4 untested
-    "enc_bits_per_feature": [16, 32],
-    "enc_w":                [4, 5, 6, 7],
+    # Round 6: removed enc_bits=32 (never top-6); removed enc_w=4 (never top-6)
+    "enc_bits_per_feature": [16],
+    "enc_w":                [5, 6, 7],
     # Detection strategy — AL never helped; fixed to False
     "use_anomaly_likelihood": [False],
-    # Warmup: initial windows skipped before any alarm can fire (first_crossing sensitive to this)
+    # Warmup: initial windows skipped before any alarm can fire
     "warmup_steps": [3, 5, 8, 12, 20],
 }
 
-# config_0000 is always the "default" from htm_train_interactive.py
+# DEFAULT_CONFIG = best config found so far (cfg0083: test F1=0.6207)
 DEFAULT_CONFIG = {
-    # Best known config (cfg0075: val F1=0.375, test F1=0.7429)
     "sp_columnDimensions":   2048,
-    "sp_numActiveColumns":   20,
-    "sp_potentialPct":       0.5,
+    "sp_numActiveColumns":   40,
+    "sp_potentialPct":       0.70,
     "sp_boostStrength":      0.0,
     "sp_synPermActiveInc":   0.05,
     "sp_synPermConnected":   0.10,
     "sp_synPermInactiveDec": 0.005,
     "tm_cellsPerColumn":     16,
-    "tm_activationThreshold":20,
-    "tm_minThreshold":       11,
+    "tm_activationThreshold":13,
+    "tm_minThreshold":       10,
     "tm_maxNewSynapseCount": 20,
     "tm_initialPermanence":  0.21,
     "tm_connectedPermanence":0.50,
@@ -74,7 +93,6 @@ DEFAULT_CONFIG = {
     "tm_permanenceDecrement":0.10,
     "enc_bits_per_feature":  16,
     "enc_w":                 5,
-    # Detection strategy (al_learning_period is fixed, not searched)
     "detection_mode":         "first_crossing",
     "use_anomaly_likelihood": False,
     "al_learning_period":     20,
@@ -103,6 +121,28 @@ def sample_config(rng):
         if is_valid(cfg):
             return cfg
     return None
+
+
+# ------------------------------------------------------------------
+# Find the next available config index from completed results
+# ------------------------------------------------------------------
+def find_start_idx(results_dir="results"):
+    """
+    Scans results/cfg*.json to find the highest config_idx already completed.
+    Returns that index + 1 (i.e., where the next batch should start).
+    Returns 0 if no results exist yet.
+    """
+    max_idx = -1
+    for fpath in glob.glob(os.path.join(results_dir, "cfg*.json")):
+        try:
+            with open(fpath) as fh:
+                r = json.load(fh)
+            idx = r.get("config_idx", -1)
+            if isinstance(idx, int) and idx > max_idx:
+                max_idx = idx
+        except Exception:
+            pass
+    return max_idx + 1
 
 
 # ------------------------------------------------------------------
@@ -136,6 +176,8 @@ def write_slurm_script(n_configs, out_path):
 
 # ---- Run this task's config ------------------------------------
 # Array index → config file (zero-padded, sorted alphabetically)
+# Old configs are deleted before each generation run, so configs/ only
+# contains the current batch; array task IDs map 1:1 to sorted files.
 mapfile -t CONFIGS < <(ls configs/config_*.json | sort)
 CONFIG="${{CONFIGS[$SLURM_ARRAY_TASK_ID]}}"
 
@@ -168,8 +210,8 @@ def main():
 
     parser = argparse.ArgumentParser(
         description="Generate HTM hyperparameter configs and SLURM script")
-    parser.add_argument("--n-configs", type=int, default=64,
-                        help="Total configs to generate (default: 64)")
+    parser.add_argument("--n-configs", type=int, default=128,
+                        help="Number of NEW configs to generate (default: 128)")
     parser.add_argument("--seed", type=int, default=0,
                         help="RNG seed for config sampling (default: 0)")
     args = parser.parse_args()
@@ -177,9 +219,29 @@ def main():
     os.makedirs("configs", exist_ok=True)
     os.makedirs("logs",    exist_ok=True)
 
-    rng     = random.Random(args.seed)
-    configs = [DEFAULT_CONFIG.copy()]   # index 0 = current default
-    seen    = {json.dumps(DEFAULT_CONFIG, sort_keys=True)}
+    # ---- Find where to continue from ----
+    start_idx = find_start_idx("results")
+    print(f"Existing completed runs: {start_idx}  (next config index: {start_idx})")
+
+    # ---- Delete old (already-run) config files ----
+    old_configs = glob.glob("configs/config_*.json")
+    if old_configs:
+        for f in old_configs:
+            os.remove(f)
+        print(f"Deleted {len(old_configs)} old config file(s) from configs/")
+
+    # ---- Sample new configs ----
+    rng = random.Random(args.seed + start_idx)   # seed shifts so we don't repeat configs
+    configs = []
+    seen    = set()
+
+    # Always include the DEFAULT_CONFIG as the first new entry
+    default = DEFAULT_CONFIG.copy()
+    default["seed"] = 42
+    configs.append(default)
+    seen.add(json.dumps({k: v for k, v in default.items()
+                         if k not in ("seed", "detection_mode", "al_learning_period")},
+                        sort_keys=True))
 
     while len(configs) < args.n_configs:
         cfg = sample_config(rng)
@@ -187,23 +249,33 @@ def main():
             print("WARNING: Could not sample more valid configs.")
             break
         cfg["seed"] = rng.randint(0, 99999)
-        key = json.dumps(cfg, sort_keys=True)
+        # Deduplicate on search-space keys only (exclude seed/detection_mode)
+        key = json.dumps({k: v for k, v in cfg.items()
+                          if k not in ("seed", "detection_mode", "al_learning_period")},
+                         sort_keys=True)
         if key not in seen:
             seen.add(key)
+            # Add fixed fields not in PARAM_SPACE
+            cfg["detection_mode"]    = "first_crossing"
+            cfg["al_learning_period"] = 20
             configs.append(cfg)
 
-    for idx, cfg in enumerate(configs):
-        path = f"configs/config_{idx:04d}.json"
+    # ---- Write config files with globally unique indices ----
+    for i, cfg in enumerate(configs):
+        global_idx = start_idx + i
+        path = f"configs/config_{global_idx:04d}.json"
         with open(path, 'w') as fh:
             json.dump(cfg, fh, indent=2)
 
-    print(f"Generated {len(configs)} configs → configs/")
-    write_slurm_script(len(configs), "slurm/submit_array.sh")
+    n = len(configs)
+    print(f"Generated {n} new configs → configs/  "
+          f"(indices {start_idx}–{start_idx + n - 1})")
+    write_slurm_script(n, "slurm/submit_array.sh")
 
     print(f"\nWorkflow:")
-    print(f"  1. python htm/htm_prepare_data.py      # once, on login node")
-    print(f"  2. sbatch slurm/submit_array.sh        # submit {len(configs)} jobs")
-    print(f"  3. python htm/htm_collect_results.py   # after all jobs finish")
+    print(f"  1. python htm/htm_generate_configs.py --n-configs {args.n_configs}")
+    print(f"  2. sbatch slurm/submit_array.sh        # submit {n} jobs")
+    print(f"  3. python htm/htm_collect_results.py   # reads ALL results/ (cumulative)")
 
 
 if __name__ == "__main__":
