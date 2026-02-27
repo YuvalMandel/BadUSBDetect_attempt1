@@ -2,15 +2,21 @@
 mlp/mlp_generate_configs.py
 Generate random MLP hyperparameter configurations and the SLURM submission script.
 
+Cumulative workflow — results are NEVER deleted:
+  Each run finds the highest config_idx already present in mlp_results/,
+  deletes old (already-run) mlp_configs/config_*.json files, then writes
+  new configs numbered from last_idx + 1 onward.
+
 Usage:
   python mlp/mlp_generate_configs.py [--n-configs 128] [--seed 0]
 
 Outputs (relative to project root):
-  mlp_configs/config_0000.json … mlp_configs/config_NNNN.json
+  mlp_configs/config_NNNN.json … (N new configs, starting after last completed)
   slurm/mlp_submit_array.sh
 """
 
 import argparse
+import glob
 import json
 import os
 import random
@@ -20,21 +26,21 @@ from pathlib import Path
 # Search space
 # ------------------------------------------------------------------
 PARAM_SPACE = {
-    "n_layers":        [2, 3, 4, 5],
+    "n_layers":           [2, 3, 4, 5],
     # hidden_dims: sampled n_layers times from this list (see sample_config)
     "hidden_dim_choices": [32, 64, 128, 256, 512],
-    "dropout":         [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
-    "batch_norm":      [True, False],
-    "activation":      ["relu", "leaky_relu", "elu", "gelu"],
-    "optimizer":       ["adam", "adamw"],
-    "lr":              [1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2],
-    "weight_decay":    [1e-6, 1e-5, 1e-4, 1e-3, 1e-2],
-    "scheduler":       ["cosine", "cosine_warm", "reduce_on_plateau", "one_cycle"],
-    "batch_size":      [16, 32, 64, 128],
-    "label_smoothing": [0.0, 0.05, 0.10, 0.15],
+    "dropout":            [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+    "batch_norm":         [True, False],
+    "activation":         ["relu", "leaky_relu", "elu", "gelu"],
+    "optimizer":          ["adam", "adamw"],
+    "lr":                 [1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2],
+    "weight_decay":       [1e-6, 1e-5, 1e-4, 1e-3, 1e-2],
+    "scheduler":          ["cosine", "cosine_warm", "reduce_on_plateau", "one_cycle"],
+    "batch_size":         [16, 32, 64, 128],
+    "label_smoothing":    [0.0, 0.05, 0.10, 0.15],
 }
 
-# config_0000 = sensible default
+# DEFAULT_CONFIG = sensible starting point (always the first entry of each new batch)
 DEFAULT_CONFIG = {
     "hidden_dims":     [128, 64, 32],
     "dropout":         0.3,
@@ -49,9 +55,17 @@ DEFAULT_CONFIG = {
     "seed":            42,
 }
 
+# Keys excluded from deduplication (seed is intentionally varied per config)
+_DEDUP_EXCLUDE = {"seed"}
+
+
+def _dedup_key(cfg):
+    return json.dumps({k: v for k, v in cfg.items() if k not in _DEDUP_EXCLUDE},
+                      sort_keys=True)
+
 
 def sample_config(rng):
-    n_layers   = rng.choice(PARAM_SPACE["n_layers"])
+    n_layers    = rng.choice(PARAM_SPACE["n_layers"])
     hidden_dims = [rng.choice(PARAM_SPACE["hidden_dim_choices"]) for _ in range(n_layers)]
     return {
         "hidden_dims":     hidden_dims,
@@ -66,6 +80,28 @@ def sample_config(rng):
         "label_smoothing": rng.choice(PARAM_SPACE["label_smoothing"]),
         "seed":            rng.randint(0, 99999),
     }
+
+
+# ------------------------------------------------------------------
+# Find the next available config index from completed results
+# ------------------------------------------------------------------
+def find_start_idx(results_dir="mlp_results"):
+    """
+    Scans mlp_results/mlp*.json to find the highest config_idx already completed.
+    Returns that index + 1 (i.e., where the next batch should start).
+    Returns 0 if no results exist yet.
+    """
+    max_idx = -1
+    for fpath in glob.glob(os.path.join(results_dir, "mlp*.json")):
+        try:
+            with open(fpath) as fh:
+                r = json.load(fh)
+            idx = r.get("config_idx", -1)
+            if isinstance(idx, int) and idx > max_idx:
+                max_idx = idx
+        except Exception:
+            pass
+    return max_idx + 1
 
 
 # ------------------------------------------------------------------
@@ -101,6 +137,8 @@ def write_slurm_script(n_configs, out_path):
 # source /path/to/.venv/bin/activate
 
 # ---- Run this task's config ------------------------------------
+# Old configs are deleted before each generation run, so mlp_configs/ only
+# contains the current batch; array task IDs map 1:1 to sorted files.
 mapfile -t CONFIGS < <(ls mlp_configs/config_*.json | sort)
 CONFIG="${{CONFIGS[$SLURM_ARRAY_TASK_ID]}}"
 
@@ -133,7 +171,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate MLP hyperparameter configs and SLURM script")
     parser.add_argument("--n-configs", type=int, default=128,
-                        help="Total configs to generate (default: 128)")
+                        help="Number of NEW configs to generate (default: 128)")
     parser.add_argument("--seed", type=int, default=0,
                         help="RNG seed for config sampling (default: 0)")
     args = parser.parse_args()
@@ -141,31 +179,52 @@ def main():
     os.makedirs("mlp_configs", exist_ok=True)
     os.makedirs("logs",        exist_ok=True)
 
-    rng     = random.Random(args.seed)
-    configs = [DEFAULT_CONFIG.copy()]
-    seen    = {json.dumps(DEFAULT_CONFIG, sort_keys=True)}
+    # ---- Find where to continue from ----
+    start_idx = find_start_idx("mlp_results")
+    print(f"Existing completed runs: {start_idx}  (next config index: {start_idx})")
+
+    # ---- Delete old (already-run) config files ----
+    old_configs = glob.glob("mlp_configs/config_*.json")
+    if old_configs:
+        for f in old_configs:
+            os.remove(f)
+        print(f"Deleted {len(old_configs)} old config file(s) from mlp_configs/")
+
+    # ---- Sample new configs ----
+    rng     = random.Random(args.seed + start_idx)   # shift seed so we don't repeat configs
+    configs = []
+    seen    = set()
+
+    # Always include the DEFAULT_CONFIG as the first entry of this batch
+    default = DEFAULT_CONFIG.copy()
+    configs.append(default)
+    seen.add(_dedup_key(default))
 
     while len(configs) < args.n_configs:
         cfg = sample_config(rng)
-        key = json.dumps(cfg, sort_keys=True)
+        key = _dedup_key(cfg)
         if key not in seen:
             seen.add(key)
             configs.append(cfg)
 
-    for idx, cfg in enumerate(configs):
-        path = f"mlp_configs/config_{idx:04d}.json"
+    # ---- Write config files with globally unique indices ----
+    for i, cfg in enumerate(configs):
+        global_idx = start_idx + i
+        path = f"mlp_configs/config_{global_idx:04d}.json"
         with open(path, 'w') as fh:
             json.dump(cfg, fh, indent=2)
 
-    print(f"Generated {len(configs)} configs → mlp_configs/")
-    write_slurm_script(len(configs), "slurm/mlp_submit_array.sh")
+    n = len(configs)
+    print(f"Generated {n} new configs → mlp_configs/  "
+          f"(indices {start_idx}–{start_idx + n - 1})")
+    write_slurm_script(n, "slurm/mlp_submit_array.sh")
 
     print(f"\nWorkflow:")
     print(f"  1. python mlp/mlp_prepare_data.py       # once, uses split.pkl for humans")
     print(f"  2. python mlp/mlp_balance_train.py      # once, balance train split")
     print(f"  3. python mlp/mlp_generate_configs.py --n-configs {args.n_configs}")
-    print(f"  4. sbatch slurm/mlp_submit_array.sh     # submit {len(configs)} jobs")
-    print(f"  5. python mlp/mlp_collect_results.py    # after all jobs finish")
+    print(f"  4. sbatch slurm/mlp_submit_array.sh     # submit {n} jobs")
+    print(f"  5. python mlp/mlp_collect_results.py    # reads ALL mlp_results/ (cumulative)")
 
 
 if __name__ == "__main__":
