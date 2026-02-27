@@ -170,9 +170,7 @@ def write_slurm_script(n_configs, out_path):
 ##SBATCH --account=<account>
 
 # ---- Environment ------------------------------------------------
-# Uncomment and edit ONE of the following to activate your env:
-# module load python/3.10
-# source /path/to/.venv/bin/activate
+source /home/yuval.mandel/HWSecurity/BadUSBDetect_attempt1/.venv/bin/activate
 
 # ---- Run this task's config ------------------------------------
 # Array index → config file (zero-padded, sorted alphabetically)
