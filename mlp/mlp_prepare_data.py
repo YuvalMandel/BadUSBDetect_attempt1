@@ -23,6 +23,7 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 import glob
+import pickle
 import random
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -52,40 +53,11 @@ OUTPUT_TRAIN = "train_dataset.csv"
 OUTPUT_VAL   = "val_dataset.csv"
 OUTPUT_TEST  = "test_dataset.csv"
 OUTPUT_REFS  = "reference_pool.npz"
+SPLIT_FILE   = "split.pkl"
 
 
 # ==============================================================================
-# 1. Person-based splitting (MLP uses ratio-based, not person-count-based)
-# ==============================================================================
-
-def split_by_person(all_files, train_ratio=TRAIN_RATIO, val_ratio=VAL_RATIO,
-                    seed=RANDOM_SEED):
-    """
-    Splits files into train/val/test with no person appearing in more than one
-    split (prevents data leakage through typing style).
-    Returns: (train_files, train_persons), (val_files, val_persons), (test_files, test_persons)
-    """
-    person_ids = sorted(set(get_person_id(f) for f in all_files))
-    rng = random.Random(seed)
-    rng.shuffle(person_ids)
-
-    n       = len(person_ids)
-    n_train = int(n * train_ratio)
-    n_val   = int(n * val_ratio)
-
-    train_persons = set(person_ids[:n_train])
-    val_persons   = set(person_ids[n_train: n_train + n_val])
-    test_persons  = set(person_ids[n_train + n_val:])
-
-    train_files = [f for f in all_files if get_person_id(f) in train_persons]
-    val_files   = [f for f in all_files if get_person_id(f) in val_persons]
-    test_files  = [f for f in all_files if get_person_id(f) in test_persons]
-
-    return (train_files, train_persons), (val_files, val_persons), (test_files, test_persons)
-
-
-# ==============================================================================
-# 2. MLP worker: produces labeled CSV rows (label appended)
+# 1. MLP worker: produces labeled CSV rows (label appended)
 # ==============================================================================
 
 def process_single_file(filepath, label, step_size, ref_dwells, ref_flights):
@@ -112,7 +84,7 @@ def process_single_file(filepath, label, step_size, ref_dwells, ref_flights):
 
 
 # ==============================================================================
-# 3. Synthetic bot generator
+# 2. Synthetic bot generator
 # ==============================================================================
 
 def generate_synthetic_bots(n_samples):
@@ -233,7 +205,7 @@ def generate_synthetic_bots(n_samples):
 
 
 # ==============================================================================
-# 4. Process one split (parallel file processing + synthetic bots)
+# 3. Process one split (parallel file processing + synthetic bots)
 # ==============================================================================
 
 def process_split(human_files, bot_files, ref_dwells, ref_flights,
@@ -271,39 +243,39 @@ def process_split(human_files, bot_files, ref_dwells, ref_flights,
 
 
 # ==============================================================================
-# 5. Main
+# 4. Main
 # ==============================================================================
 
 def main():
-    # ---- 1. Collect all Task 1 human files ----
-    all_human_files = []
-    for folder in FOLDERS["Humans"]:
-        files = glob.glob(os.path.join(folder, "**", "*.txt"), recursive=True)
-        all_human_files.extend(f for f in files if is_task1(f))
-
-    print(f"Task 1 human files found: {len(all_human_files)}")
-    if not all_human_files:
-        print("ERROR: No Task 1 human files found. Check FOLDERS paths in common/keystroke_features.py.")
+    # ---- 1. Load human split from split.pkl (same as HTM for comparable F1) ----
+    if not os.path.exists(SPLIT_FILE):
+        print(f"ERROR: '{SPLIT_FILE}' not found. Run htm/htm_prepare_data.py first.")
         return
 
-    # ---- 2. Person-based split ----
-    (train_human, train_persons), \
-    (val_human,   val_persons),   \
-    (test_human,  test_persons)   = split_by_person(all_human_files)
+    with open(SPLIT_FILE, 'rb') as fh:
+        split = pickle.load(fh)
+    train_human = split['train_human']
+    val_human   = split['val_human']
+    test_human  = split['test_human']
 
-    print(f"\nPerson split — Train: {len(train_persons)}, "
+    train_persons = set(get_person_id(f) for f in train_human)
+    val_persons   = set(get_person_id(f) for f in val_human)
+    test_persons  = set(get_person_id(f) for f in test_human)
+
+    print(f"Loaded human split from {SPLIT_FILE}")
+    print(f"Person split — Train: {len(train_persons)}, "
           f"Val: {len(val_persons)}, Test: {len(test_persons)}")
     print(f"File split   — Train: {len(train_human)}, "
           f"Val: {len(val_human)}, Test: {len(test_human)}")
 
-    # ---- 3. Reference pool from TRAIN humans only ----
+    # ---- 2. Reference pool from TRAIN humans only ----
     ref_dwells, ref_flights = create_reference_pool(train_human)
     if not ref_dwells:
         return
     np.savez(OUTPUT_REFS, dwell=ref_dwells, flight=ref_flights)
     print("Reference pool saved.")
 
-    # ---- 4. Collect and split real bot files ----
+    # ---- 3. Collect and split real bot files ----
     all_bot_files = []
     for folder in FOLDERS["Bots"]:
         all_bot_files.extend(
@@ -321,12 +293,12 @@ def main():
     print(f"\nReal bot files — Train: {len(train_bots)}, "
           f"Val: {len(val_bots)}, Test: {len(test_bots)}")
 
-    # ---- 5. Synthetic bot counts proportional to split sizes ----
+    # ---- 4. Synthetic bot counts proportional to split sizes ----
     n_synth_train = SYNTHETIC_SAMPLES
     n_synth_val   = int(SYNTHETIC_SAMPLES * VAL_RATIO / TRAIN_RATIO)
     n_synth_test  = int(SYNTHETIC_SAMPLES * (1 - TRAIN_RATIO - VAL_RATIO) / TRAIN_RATIO)
 
-    # ---- 6. Process each split and save ----
+    # ---- 5. Process each split and save ----
     cols = ["F_Mean", "F_Med", "F_Std", "F_Skew", "F_Kurt", "F_MinKS", "F_MinW",
             "D_Mean", "D_Med", "D_Std", "D_Skew", "D_Kurt", "D_MinKS", "D_MinW", "Label"]
 
