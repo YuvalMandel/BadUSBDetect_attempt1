@@ -132,7 +132,8 @@ def write_slurm_script(n_configs, out_path):
 ##SBATCH --account=<account>
 
 # ---- Environment ------------------------------------------------
-source /home/yuval.mandel/HWSecurity/BadUSBDetect_attempt1/.venv/bin/activate
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate htm_keyboard_1
 
 # ---- Run this task's config ------------------------------------
 # Old configs are deleted before each generation run, so mlp_configs/ only
