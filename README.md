@@ -44,9 +44,10 @@ source /path/to/.venv/bin/activate
 ├── htm_distance/
 │   ├── htm_distance_common.py         QWERTY layout, one-hot key encoder, scalar encoders, parser
 │   ├── htm_distance_prepare_data.py   Parse files → dist_cache.pkl  (key_idx, dwell, flight, dist)
-│   ├── htm_distance_train_single.py   SLURM worker — train one HTM-distance config
+│   ├── htm_distance_train_single.py      SLURM worker — train one HTM-distance config
 │   ├── htm_distance_generate_configs.py  Generate dist_configs/ + slurm/dist_submit_array.sh
-│   └── htm_distance_collect_results.py  Aggregate dist_results/  →  leaderboard
+│   ├── htm_distance_collect_results.py   Aggregate dist_results/  →  leaderboard
+│   └── htm_distance_test_model.py        Test a saved model (3 evaluation modes)
 │
 ├── mlp/
 │   ├── mlp_prepare_data.py    Parse raw files → train/val/test CSV + reference pool
@@ -247,6 +248,48 @@ python htm_distance/htm_distance_collect_results.py --top 20
 ```
 
 Reads all `dist_results/dist*.json` and writes `dist_results/leaderboard.txt` and `.csv`.
+
+### Step 5 — Test a saved model
+
+```bash
+python htm_distance/htm_distance_test_model.py \
+    --model dist_models/<slug>.pkl \
+    --mode all_non_train
+```
+
+#### Evaluation modes (`--mode`)
+
+| Mode | Description |
+|------|-------------|
+| `orig` | Val and test splits from `split.pkl` (same files used during training) |
+| `all_non_train` | All files in `dist_cache.pkl` that were not in the training set (default) |
+| `all_other_files` | Walk `--data_root` for new human `.txt` files + `--bots_root` for bot files; parsed on the fly — no cache needed |
+
+#### Additional flags
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--data_root` | `../UB_keystroke_dataset/` | Human files root for `all_other_files` mode |
+| `--bots_root` | `../BadUSBdataset` | Bot files root for `all_other_files` mode |
+| `--write_decision_log` | off | Write a per-keystroke log for one human + one bot file |
+
+#### Decision log (`--write_decision_log`)
+
+Written to `logs/<slug>_human_log.txt` and `logs/<slug>_bot_log.txt`.
+One row per keystroke:
+
+```
+ Step  Key    Dwell   Flight    Dist    Score          Status  Reason
+------  ---  -------  -------  ------  -------  --------------  --------------------------------------------------
+     0  'I'    141.0      0.0   0.000   0.0000          WARMUP  warmup (1/200)
+   200  'H'     78.0    110.0   2.693   0.1250      no crossing  score 0.1250 < 0.9697
+   201  'E'    110.0      0.0   2.000   0.9800             BOT  first crossing: 0.9800 >= 0.9697
+   202  ' '    109.0      0.0   4.243   0.9800             BOT  already triggered at step 201
+```
+
+> Key difference from the original HTM tester: no reference pool or feature windows
+> are needed. `parse_file_distance` runs directly on raw `.txt` files, so
+> `all_other_files` mode is fast and requires no pre-computation step.
 
 ### Clean before re-run (encoder or parser changed)
 
