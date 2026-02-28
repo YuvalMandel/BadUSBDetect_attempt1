@@ -267,10 +267,10 @@ def parse_file_distance(filepath: str) -> list:
 # 4. SDR encoder
 # ──────────────────────────────────────────────────────────────────
 # Fixed physical ranges used by all configs (no data-derived min/max)
-KEY_IDX_MIN, KEY_IDX_MAX =   0,   94    # printable ASCII index
-DWELL_MIN,   DWELL_MAX   =   0,  400.0  # ms  (plot: 30–300 ms bulk)
-FLIGHT_MIN,  FLIGHT_MAX  =   0,  500.0  # ms  (plot: 0–400 ms bulk)
-DIST_MIN,    DIST_MAX    =   0,   12.0  # QWERTY Euclidean units
+NUM_KEYS   = 95        # printable ASCII 32–126 → indices 0–94
+DWELL_MIN,  DWELL_MAX  =  0, 400.0   # ms  (plot: 30–300 ms bulk)
+FLIGHT_MIN, FLIGHT_MAX =  0, 500.0   # ms  (plot: 0–400 ms bulk)
+DIST_MIN,   DIST_MAX   =  0,  12.0   # QWERTY Euclidean units
 
 
 class SimpleScalarEncoder:
@@ -293,25 +293,46 @@ class SimpleScalarEncoder:
 
 class DistanceEncoder:
     """
-    Concatenated scalar SDR for 4 attributes:
-      [key_idx | dwell | flight | distance]
-    Total bits = 4 × bits_per_feature.
+    SDR for one keystroke event:
+
+      [key_type | dwell | flight | distance]
+
+    key_type : 95 bits, exactly 1 active (true one-hot).
+               Each of the 95 printable ASCII keys gets its own unique bit;
+               no two keys ever share any active bit.
+
+    dwell    : bits_per_feature bits, w active  (scalar, overlapping blocks)
+    flight   : bits_per_feature bits, w active
+    distance : bits_per_feature bits, w active
+
+    Total bits   = 95 + 3 * bits_per_feature
+    Active bits  =  1 + 3 * w
     """
+    KEY_BITS = NUM_KEYS   # 95, fixed — not a tunable hyperparameter
+
     def __init__(self, bits_per_feature: int = 32, w: int = 5):
         self.bits_per_feature = bits_per_feature
-        self.total_bits       = 4 * bits_per_feature
-        self._enc = [
-            SimpleScalarEncoder(KEY_IDX_MIN, KEY_IDX_MAX, bits_per_feature, w),
-            SimpleScalarEncoder(DWELL_MIN,   DWELL_MAX,   bits_per_feature, w),
-            SimpleScalarEncoder(FLIGHT_MIN,  FLIGHT_MAX,  bits_per_feature, w),
-            SimpleScalarEncoder(DIST_MIN,    DIST_MAX,    bits_per_feature, w),
+        self.w                = w
+        self.total_bits       = self.KEY_BITS + 3 * bits_per_feature
+        self._scalar_enc = [
+            SimpleScalarEncoder(DWELL_MIN,  DWELL_MAX,  bits_per_feature, w),
+            SimpleScalarEncoder(FLIGHT_MIN, FLIGHT_MAX, bits_per_feature, w),
+            SimpleScalarEncoder(DIST_MIN,   DIST_MAX,   bits_per_feature, w),
         ]
 
     def encode(self, key_idx: int, dwell: float,
                flight: float, distance: float) -> np.ndarray:
         dense = np.zeros(self.total_bits, dtype=np.uint8)
-        for i, val in enumerate((key_idx, dwell, flight, distance)):
-            self._enc[i].encode_into(val, dense, i * self.bits_per_feature)
+
+        # One-hot key: bit at position key_idx (clamped to 0–94)
+        dense[max(0, min(self.KEY_BITS - 1, key_idx))] = 1
+
+        # Scalar features starting right after the key block
+        offset = self.KEY_BITS
+        for enc, val in zip(self._scalar_enc, (dwell, flight, distance)):
+            enc.encode_into(val, dense, offset)
+            offset += self.bits_per_feature
+
         return dense
 
 

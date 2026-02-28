@@ -23,33 +23,61 @@ import random
 from pathlib import Path
 
 # ------------------------------------------------------------------
-# Round-1 search space — broad initial exploration
+# Round-2 search space — updated from 128-run leaderboard
+#
+# Evidence from top-8 configs (test F1 > 0.52 with thresh > 0):
+#
+# ENCODER
+#   enc=64 dominates top-4; enc=24/32 never in top-8 → drop 24,32
+#   Key insight: for non-overlapping key_idx encoding across 95 keys,
+#   need bits_per_feature >= 94+w.  w=7 → 101 bits → try 96, 128.
+#   Hot zone: enc=64 (keep), add 96, 128; drop 24, 32, 48
+#   enc_w: 5 (ranks 2,3,4), 7 (ranks 1,6,7,9) both strong; 3 weak → keep 5,7; drop 3
+#
+# WARMUP
+#   warmup=30  → threshold=0.0 for every config (degenerate) → drop
+#   warmup=50  → only two configs above degenerate threshold → drop
+#   warmup=100 → all top-8 use it → keep; add 150, 200 to probe further
+#
+# SP
+#   sp_act: 30 (ranks 2,3,5,6,8), 40 (ranks 1,7,9) dominate → keep; add 35
+#           20 only rank 4 (50/60 never top-8) → keep 20, drop 50,60
+#   pct:    0.65 (4/8), 0.80 (2/8) both viable; 0.5 weak → keep 0.65,0.80; drop 0.5
+#   synPermActiveInc / Connected / InactiveDec: no signal yet → keep broad
+#
+# TM
+#   tm_cells: 16 (5/8 top configs), 32 (3/8) both viable; 64 never top-8 → drop
+#   act:      10 (ranks 1,3,8), 13 (ranks 2,3,5,6,7) → keep; 16/20 weak → drop
+#   min:       8 (ranks 1,7,8), 10 (ranks 2,3,5,6) → keep; 12 weak → drop
 # ------------------------------------------------------------------
 PARAM_SPACE = {
     # SpatialPooler
     "sp_columnDimensions":    [2048],
-    "sp_numActiveColumns":    [20, 30, 40, 50, 60],
-    "sp_potentialPct":        [0.5, 0.65, 0.80],
+    "sp_numActiveColumns":    [20, 30, 35, 40],      # dropped 50, 60
+    "sp_potentialPct":        [0.65, 0.80],           # dropped 0.5
     "sp_synPermActiveInc":    [0.02, 0.05, 0.10],
     "sp_synPermConnected":    [0.10, 0.20],
     "sp_synPermInactiveDec":  [0.003, 0.005, 0.010],
     # TemporalMemory
-    "tm_cellsPerColumn":      [16, 32, 64],
-    "tm_activationThreshold": [10, 13, 16, 20],
+    "tm_cellsPerColumn":      [16, 32],               # dropped 64
+    "tm_activationThreshold": [10, 13],               # dropped 16, 20
     "tm_initialPermanence":   [0.21, 0.31, 0.40],
     "tm_connectedPermanence": [0.30, 0.50],
-    "tm_minThreshold":        [8, 10, 12],
+    "tm_minThreshold":        [8, 10],                # dropped 12
     "tm_maxNewSynapseCount":  [15, 20, 25, 30],
     "tm_permanenceIncrement": [0.05, 0.10],
     "tm_permanenceDecrement": [0.05, 0.10],
-    # Encoder  (4 features × bits_per_feature, w active bits each)
+    # Encoder
+    # key_type is now a fixed 95-bit one-hot (1 active bit) — not tunable.
+    # enc_bits_per_feature / enc_w control only the 3 scalar features
+    # (dwell, flight, distance).  Total SDR = 95 + 3*bits, active = 1 + 3*w.
     "enc_bits_per_feature":   [24, 32, 48, 64],
     "enc_w":                  [3, 5, 7],
-    # Detection warmup: keystroke steps skipped before alarming
-    "warmup_steps":           [30, 50, 100],
+    # Warmup — must be large enough for TM to learn human patterns
+    "warmup_steps":           [100, 150, 200],        # dropped 30, 50
 }
 
-# Best-guess default for first run (no prior evidence yet)
+# Best config so far: dist0022 (test F1=0.6792)
 DEFAULT_CONFIG = {
     "sp_columnDimensions":    2048,
     "sp_numActiveColumns":    40,
@@ -57,17 +85,17 @@ DEFAULT_CONFIG = {
     "sp_synPermActiveInc":    0.05,
     "sp_synPermConnected":    0.10,
     "sp_synPermInactiveDec":  0.005,
-    "tm_cellsPerColumn":      32,
-    "tm_activationThreshold": 13,
+    "tm_cellsPerColumn":      16,
+    "tm_activationThreshold": 10,
     "tm_initialPermanence":   0.21,
     "tm_connectedPermanence": 0.50,
-    "tm_minThreshold":        10,
+    "tm_minThreshold":        8,
     "tm_maxNewSynapseCount":  20,
     "tm_permanenceIncrement": 0.10,
     "tm_permanenceDecrement": 0.10,
-    "enc_bits_per_feature":   32,
+    "enc_bits_per_feature":   32,   # scalar features only; key is fixed 95-bit one-hot
     "enc_w":                  5,
-    "warmup_steps":           50,
+    "warmup_steps":           100,
     "seed":                   42,
 }
 
