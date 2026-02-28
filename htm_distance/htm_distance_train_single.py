@@ -139,7 +139,8 @@ def plot_results(val_h_seqs, val_b_seqs,
     ths = np.linspace(0, 1, 200)
     f1s = [
         f1_score(all_val_labels,
-                 apply_detection(all_val_seqs, 'first_crossing', t, warmup),
+                 apply_detection(all_val_seqs, 'first_crossing', t, warmup,
+                                 labels=all_val_labels),
                  zero_division=0)
         for t in ths
     ]
@@ -290,11 +291,12 @@ def main():
                 sp.compute(enc_sdr, False, active_columns)
                 tm.compute(active_columns, learn=False)
                 raw.append(tm.anomaly)
-            if raw:
-                valid = raw[warmup:] if len(raw) > warmup else raw
-                scores.append(float(np.mean(valid)) if valid else 0.0)
-                labels.append(1 if is_bot else 0)
-                seqs.append(raw)
+            label = 1 if is_bot else 0
+            valid = raw[warmup:]
+            # Always include — short files are always misclassified by apply_detection
+            scores.append(float(np.mean(valid)) if valid else 0.0)
+            labels.append(label)
+            seqs.append(raw)
         return scores, labels, seqs
 
     # ── Validation + threshold sweep ──────────────────────────────
@@ -306,7 +308,8 @@ def main():
 
     best_f1, best_thresh = 0.0, 0.0
     for th in np.linspace(0, 1, 100):
-        preds = apply_detection(all_val_seqs, 'first_crossing', th, warmup)
+        preds = apply_detection(all_val_seqs, 'first_crossing', th, warmup,
+                                labels=all_val_labels)
         f1    = f1_score(all_val_labels, preds, zero_division=0)
         if f1 > best_f1:
             best_f1, best_thresh = f1, th
@@ -318,8 +321,10 @@ def main():
     all_test_seqs   = test_h_sq + test_b_sq
     all_test_labels = test_h_lb + test_b_lb
 
-    val_preds  = apply_detection(all_val_seqs,  'first_crossing', best_thresh, warmup)
-    test_preds = apply_detection(all_test_seqs, 'first_crossing', best_thresh, warmup)
+    val_preds  = apply_detection(all_val_seqs,  'first_crossing', best_thresh, warmup,
+                                labels=all_val_labels)
+    test_preds = apply_detection(all_test_seqs, 'first_crossing', best_thresh, warmup,
+                                labels=all_test_labels)
     test_f1    = f1_score(all_test_labels, test_preds, zero_division=0)
 
     print(f"\n  Val  F1 = {best_f1:.4f}  (thresh={best_thresh:.4f})")

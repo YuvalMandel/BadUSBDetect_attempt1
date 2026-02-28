@@ -344,16 +344,22 @@ WARMUP_STEPS = 50   # keystrokes to skip before alarming (more than original
 
 
 def apply_detection(seqs: list, mode: str, thresh: float,
-                    warmup: int = WARMUP_STEPS) -> list:
+                    warmup: int = WARMUP_STEPS,
+                    labels: list = None) -> list:
     """
     mode='first_crossing': file is Bot if any post-warmup score >= thresh.
     mode='mean':           file is Bot if mean(post-warmup scores) >= thresh.
+
+    Files shorter than warmup have no post-warmup keystrokes and are always
+    treated as misclassified: prediction = 1 - true_label.  Pass `labels` to
+    enable this; without labels, short files fall back to predicting Human (0).
     """
     preds = []
-    for seq in seqs:
-        post = seq[warmup:] if len(seq) > warmup else seq
+    for i, seq in enumerate(seqs):
+        post = seq[warmup:]   # empty if len(seq) <= warmup
         if not post:
-            preds.append(0)
+            # Too short — always wrong
+            preds.append(1 - labels[i] if labels is not None else 0)
             continue
         if mode == 'first_crossing':
             preds.append(1 if any(s >= thresh for s in post) else 0)

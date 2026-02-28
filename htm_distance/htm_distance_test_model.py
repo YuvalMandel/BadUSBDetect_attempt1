@@ -87,11 +87,12 @@ def run_inference(model_data, dist_cache, file_list, is_bot,
             tm.compute(active_cols, learn=False)
             raw.append(float(tm.anomaly))
 
-        if raw:
-            valid = raw[warmup:] if len(raw) > warmup else raw
-            scores.append(float(np.mean(valid)) if valid else 0.0)
-            labels.append(1 if is_bot else 0)
-            seqs.append(raw)
+        label = 1 if is_bot else 0
+        valid = raw[warmup:]
+        # Always include — short files are always misclassified by apply_detection
+        scores.append(float(np.mean(valid)) if valid else 0.0)
+        labels.append(label)
+        seqs.append(raw)
 
     return scores, labels, seqs
 
@@ -135,12 +136,19 @@ def write_decision_log(filepath, events, model_data, true_label,
 
         rows.append((step, ch, dwell, flight, dist, score, status, reason))
 
-    final_pred = 1 if bot_triggered_at is not None else 0
+    short_file = len(events) <= warmup
+    if short_file:
+        final_pred = 1 - true_label   # always misclassified
+    else:
+        final_pred = 1 if bot_triggered_at is not None else 0
     verdict    = "CORRECT" if final_pred == true_label else "WRONG"
 
     with open(output_path, "w") as fh:
         fh.write(f"# File:           {filepath}\n")
         fh.write(f"# True label:     {'BOT' if true_label else 'HUMAN'}\n")
+        if short_file:
+            fh.write(f"# SHORT FILE:     {len(events)} keystrokes < warmup={warmup}"
+                     f" — auto-misclassified\n")
         fh.write(f"# Final decision: {'BOT' if final_pred else 'HUMAN'}  [{verdict}]\n")
         fh.write(f"# Threshold:      {thresh:.4f}\n")
         fh.write(f"# Warmup steps:   {warmup}\n")
@@ -192,7 +200,8 @@ def plot_results(h_seqs, b_seqs, h_scores, b_scores,
     ths = np.linspace(0, 1, 200)
     f1s = [
         f1_score(all_labels,
-                 apply_detection(all_seqs, "first_crossing", t, warmup),
+                 apply_detection(all_seqs, "first_crossing", t, warmup,
+                                 labels=all_labels),
                  zero_division=0)
         for t in ths
     ]
@@ -229,7 +238,8 @@ def plot_confusion(all_labels, all_preds, subset_name, fname_slug):
 
 
 def report(all_labels, all_seqs, thresh, warmup, subset_name):
-    preds  = apply_detection(all_seqs, "first_crossing", thresh, warmup)
+    preds  = apply_detection(all_seqs, "first_crossing", thresh, warmup,
+                             labels=all_labels)
     unique = sorted(set(all_labels))
     f1     = f1_score(all_labels, preds, labels=unique, zero_division=0)
     print(f"\n{'='*45}")
