@@ -5,8 +5,9 @@ Two models are implemented:
 
 | Model | Folder | Approach |
 |-------|--------|----------|
-| HTM (anomaly)    | `htm/` | Unsupervised; learns normal typing, flags deviations |
-| MLP (supervised) | `mlp/` | Binary classifier trained on labelled windows |
+| HTM (anomaly)          | `htm/`          | Unsupervised; learns normal typing, flags deviations |
+| HTM-Distance (anomaly) | `htm_distance/` | Same as HTM but raw per-keystroke events: key type + dwell + flight + QWERTY distance |
+| MLP (supervised)       | `mlp/`          | Binary classifier trained on labelled windows |
 
 ---
 
@@ -40,6 +41,13 @@ source /path/to/.venv/bin/activate
 │   ├── htm_test_model.py      Test a trained HTM model (3 evaluation modes)
 │   └── htm_collect_results.py Aggregate results/  →  leaderboard
 │
+├── htm_distance/
+│   ├── htm_distance_common.py         QWERTY layout, one-hot key encoder, scalar encoders, parser
+│   ├── htm_distance_prepare_data.py   Parse files → dist_cache.pkl  (key_idx, dwell, flight, dist)
+│   ├── htm_distance_train_single.py   SLURM worker — train one HTM-distance config
+│   ├── htm_distance_generate_configs.py  Generate dist_configs/ + slurm/dist_submit_array.sh
+│   └── htm_distance_collect_results.py  Aggregate dist_results/  →  leaderboard
+│
 ├── mlp/
 │   ├── mlp_prepare_data.py    Parse raw files → train/val/test CSV + reference pool
 │   ├── mlp_balance_train.py   Balance the training CSV (trim human majority)
@@ -54,15 +62,21 @@ source /path/to/.venv/bin/activate
 ├── mlp_configs/           JSON MLP configs for current SLURM batch  [gitignored per-run]
 │   └── config_NNNN.json
 │
-├── models/                Trained HTM model pkl files  [gitignored]
-├── plots/                 HTM PNG plots                [gitignored]
-├── results/               HTM per-run JSON + leaderboard  [gitignored]
-├── mlp_models/            Trained MLP model pth files  [gitignored]
-├── mlp_plots/             MLP PNG plots                [gitignored]
-├── mlp_results/           MLP per-run JSON + leaderboard  [gitignored]
-├── logs/                  SLURM stdout/stderr          [gitignored]
+├── models/                Trained HTM model pkl files        [gitignored]
+├── plots/                 HTM PNG plots                      [gitignored]
+├── results/               HTM per-run JSON + leaderboard     [gitignored]
+├── dist_configs/          JSON dist configs for current batch[gitignored per-run]
+│   └── config_NNNN.json
+├── dist_models/           Trained HTM-distance pkl files     [gitignored]
+├── dist_plots/            HTM-distance PNG plots             [gitignored]
+├── dist_results/          HTM-distance per-run JSON + leaderboard  [gitignored]
+├── mlp_models/            Trained MLP model pth files        [gitignored]
+├── mlp_plots/             MLP PNG plots                      [gitignored]
+├── mlp_results/           MLP per-run JSON + leaderboard     [gitignored]
+├── logs/                  SLURM stdout/stderr                [gitignored]
 └── slurm/
     ├── submit_array.sh        Generated HTM SLURM submission script
+    ├── dist_submit_array.sh   Generated HTM-distance SLURM submission script
     └── mlp_submit_array.sh    Generated MLP SLURM submission script
 ```
 
@@ -150,6 +164,138 @@ rm mlp_results/mlp*.json mlp_results/mlp_leaderboard.csv mlp_results/mlp_leaderb
 rm mlp_models/mlp*.pth
 rm mlp_plots/mlp*_confusion.png
 ```
+
+---
+
+## How the detection threshold is chosen
+
+The HTM and HTM-Distance models produce an anomaly score per timestep (0–1).
+A file is flagged as a bot when the first post-warmup score exceeds a threshold
+(`first_crossing` mode). The threshold is **not** a pre-training hyperparameter
+because its optimal value is unknowable before training — it depends on where
+the model's output distribution lands.
+
+Instead, after training, the threshold is found by:
+
+1. Running the trained model (no learning) on the **validation set**.
+2. Sweeping 100 candidate thresholds from 0 to 1.
+3. Picking the threshold that maximises **validation F1**.
+4. Applying that threshold to the **test set** to get the reported test F1.
+
+This is standard post-hoc threshold calibration. The threshold is saved in the
+model `.pkl` alongside the SP and TM objects so it can be used at inference time
+without re-calibration. The ~0.96–0.98 values seen in the leaderboard reflect
+that well-trained models produce nearly binary output: human files score near 0,
+bot files near 1, and any threshold in the gap gives the same result.
+
+---
+
+## HTM-Distance hyperparameter search on Newton SLURM
+
+Variant of the HTM that operates on raw per-keystroke events instead of
+statistical windows. Each timestep fed to the HTM encodes:
+
+| Feature | Encoding | Bits | Active |
+|---------|----------|------|--------|
+| Key type (1 of 95 printable ASCII keys) | One-hot | 95 | 1 |
+| Dwell time (key hold duration, ms) | Scalar | `enc_bits_per_feature` | `enc_w` |
+| Flight time (gap since previous key-up, ms) | Scalar | `enc_bits_per_feature` | `enc_w` |
+| QWERTY distance from previous key (units) | Scalar | `enc_bits_per_feature` | `enc_w` |
+| **Total** | | **95 + 3 × enc_bits** | **1 + 3 × enc_w** |
+
+> The key one-hot block is fixed at 95 bits regardless of `enc_bits_per_feature`.
+> Best so far: `enc_bits=24, enc_w=7` → SDR = 95+72 = **167 bits, 22 active (13.2% sparsity)**.
+
+### Step 1 — Prepare data (run once; requires `split.pkl`)
+
+```bash
+python htm/htm_prepare_data.py          # creates split.pkl if not already done
+python htm_distance/htm_distance_prepare_data.py   # creates dist_cache.pkl
+```
+
+`dist_cache.pkl` maps every file path to its list of `(key_idx, dwell_ms, flight_ms, dist_units)` tuples.
+
+### Step 2 — Generate configs and SLURM script
+
+```bash
+python htm_distance/htm_distance_generate_configs.py --n-configs 128 --seed 0
+```
+
+- Scans `dist_results/dist*.json` to find the highest completed index
+- Deletes old `dist_configs/config_*.json` (already-run; results are preserved)
+- Writes new configs numbered `last_idx + 1` … `last_idx + N`
+- Writes `slurm/dist_submit_array.sh`
+
+### Step 3 — Submit to Newton
+
+```bash
+# Edit slurm/dist_submit_array.sh to set --partition, --account, and activate your env.
+sbatch slurm/dist_submit_array.sh
+```
+
+Monitor:
+
+```bash
+squeue -u $USER
+ls dist_results/ | wc -l          # jobs finished so far
+```
+
+### Step 4 — Collect results
+
+```bash
+python htm_distance/htm_distance_collect_results.py --top 20
+```
+
+Reads all `dist_results/dist*.json` and writes `dist_results/leaderboard.txt` and `.csv`.
+
+### Clean before re-run (encoder or parser changed)
+
+If you change the encoder (`DistanceEncoder`) or the key parser (`parse_file_distance` /
+`key_to_char`), the cache and all old results are stale and must be wiped:
+
+```bash
+rm dist_cache.pkl
+rm -rf dist_models/ dist_results/ dist_plots/ dist_configs/
+```
+
+Then start from Step 1 above.
+
+> `split.pkl` and `features_cache.pkl` are **not** affected and do not need to be deleted.
+
+### Best config so far (Round 3, 82 runs, corrected one-hot encoder)
+
+`dist0027`: `sp_act=30, pct=0.8, enc=24w7, tm=32, act=13, min=8, wu=200`
+→ **val F1=0.4444, test F1=0.9474**
+
+```python
+import pickle
+with open("dist_models/dist0027_sp30_enc24w7_tm32_act13_wu200_vf10.4444_tf10.9474.pkl", "rb") as f:
+    m = pickle.load(f)
+sp, tm, encoder, thresh = m["sp"], m["tm"], m["encoder"], m["best_thresh"]
+```
+
+### HTM-Distance search space (Round 3)
+
+| Group | Parameter | Values | Notes |
+|-------|-----------|--------|-------|
+| SP | `numActiveColumns` | 20, **25**, 30, 35, 40 | added 25 to probe 20–30 gap |
+| SP | `potentialPct` | 0.65, 0.80 | both equally viable |
+| SP | `synPermActiveInc` | 0.02, 0.05, 0.10 | |
+| SP | `synPermConnected` | 0.10, 0.20 | |
+| SP | `synPermInactiveDec` | 0.003, 0.005, 0.010 | |
+| TM | `cellsPerColumn` | 16, 32 | both viable (rank 1=32, rank 2=16) |
+| TM | `activationThreshold` | 10, 13 | both viable |
+| TM | `minThreshold` | 8, 10 | both viable; 8 slightly more in top-10 |
+| TM | `maxNewSynapseCount` | 15, 20, 25, 30 | |
+| TM | `initialPermanence` | 0.21, 0.31, 0.40 | |
+| TM | `connectedPermanence` | 0.30, 0.50 | |
+| TM | `permanenceIncrement` | 0.05, 0.10 | |
+| TM | `permanenceDecrement` | 0.05, 0.10 | |
+| Enc | `enc_bits_per_feature` | **16**, 24, 32 | enc=24 dominates top-10; **try 16** (more sparsity); dropped 48, 64 |
+| Enc | `enc_w` | 5, 7, **9** | w=7 dominates top-5; **try 9**; dropped 3 |
+| Det | `warmup_steps` | 150, 200, **250**, **300** | longer=better; rank 1 uses 200; dropped 100 |
+
+**Bold** = added in Round 3. Dropped: enc=48, enc=64, enc_w=3, warmup=100.
 
 ---
 

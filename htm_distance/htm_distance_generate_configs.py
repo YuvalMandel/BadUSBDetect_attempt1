@@ -23,79 +23,78 @@ import random
 from pathlib import Path
 
 # ------------------------------------------------------------------
-# Round-2 search space — updated from 128-run leaderboard
+# Round-3 search space — updated from 82-run leaderboard (corrected encoder)
 #
-# Evidence from top-8 configs (test F1 > 0.52 with thresh > 0):
-#
-# ENCODER
-#   enc=64 dominates top-4; enc=24/32 never in top-8 → drop 24,32
-#   Key insight: for non-overlapping key_idx encoding across 95 keys,
-#   need bits_per_feature >= 94+w.  w=7 → 101 bits → try 96, 128.
-#   Hot zone: enc=64 (keep), add 96, 128; drop 24, 32, 48
-#   enc_w: 5 (ranks 2,3,4), 7 (ranks 1,6,7,9) both strong; 3 weak → keep 5,7; drop 3
+# ENCODER  (key is fixed 95-bit one-hot; enc_bits/w control scalar features only)
+#   enc=24  : 7 of top-10 configs → DOMINANT; total SDR = 167 bits, 22 active (13.2%)
+#   enc=32  : only ranks 13-19
+#   enc=48,64: never in top-10 → drop
+#   → add enc=16 (even higher sparsity ~16%), keep 24; drop 32, 48, 64
+#   enc_w=7 : dominates ranks 1-5; enc_w=5 fills ranks 6-17; enc_w=3 weak
+#   → keep 5, 7; add 9 to probe wider; drop 3
 #
 # WARMUP
-#   warmup=30  → threshold=0.0 for every config (degenerate) → drop
-#   warmup=50  → only two configs above degenerate threshold → drop
-#   warmup=100 → all top-8 use it → keep; add 150, 200 to probe further
+#   warmup=200 → rank 1 (best)
+#   warmup=150 → many in top-10
+#   warmup=100 → only mid-table; drop
+#   → keep 150, 200; add 250, 300 (longer may help further)
 #
 # SP
-#   sp_act: 30 (ranks 2,3,5,6,8), 40 (ranks 1,7,9) dominate → keep; add 35
-#           20 only rank 4 (50/60 never top-8) → keep 20, drop 50,60
-#   pct:    0.65 (4/8), 0.80 (2/8) both viable; 0.5 weak → keep 0.65,0.80; drop 0.5
-#   synPermActiveInc / Connected / InactiveDec: no signal yet → keep broad
+#   sp_act=30: 7 of top-20 including rank 1 → hot zone
+#   sp_act=20: rank 2; sp_act=40: ranks 3,4,9
+#   → keep 20, 30, 35, 40; add 25 to probe between 20 and 30
+#   pct=0.65 vs 0.80: both equally viable (10/10 split in top 20) → keep both
 #
 # TM
-#   tm_cells: 16 (5/8 top configs), 32 (3/8) both viable; 64 never top-8 → drop
-#   act:      10 (ranks 1,3,8), 13 (ranks 2,3,5,6,7) → keep; 16/20 weak → drop
-#   min:       8 (ranks 1,7,8), 10 (ranks 2,3,5,6) → keep; 12 weak → drop
+#   tm_cells=16: 11/20; tm_cells=32: 8/20 (rank 1 uses 32) → both viable
+#   act=10 vs act=13: ~equal split → both viable
+#   min=8 vs min=10: ~equal split → both viable
 # ------------------------------------------------------------------
 PARAM_SPACE = {
     # SpatialPooler
     "sp_columnDimensions":    [2048],
-    "sp_numActiveColumns":    [20, 30, 35, 40],      # dropped 50, 60
-    "sp_potentialPct":        [0.65, 0.80],           # dropped 0.5
+    "sp_numActiveColumns":    [20, 25, 30, 35, 40],   # added 25
+    "sp_potentialPct":        [0.65, 0.80],
     "sp_synPermActiveInc":    [0.02, 0.05, 0.10],
     "sp_synPermConnected":    [0.10, 0.20],
     "sp_synPermInactiveDec":  [0.003, 0.005, 0.010],
     # TemporalMemory
-    "tm_cellsPerColumn":      [16, 32],               # dropped 64
-    "tm_activationThreshold": [10, 13],               # dropped 16, 20
+    "tm_cellsPerColumn":      [16, 32],
+    "tm_activationThreshold": [10, 13],
     "tm_initialPermanence":   [0.21, 0.31, 0.40],
     "tm_connectedPermanence": [0.30, 0.50],
-    "tm_minThreshold":        [8, 10],                # dropped 12
+    "tm_minThreshold":        [8, 10],
     "tm_maxNewSynapseCount":  [15, 20, 25, 30],
     "tm_permanenceIncrement": [0.05, 0.10],
     "tm_permanenceDecrement": [0.05, 0.10],
-    # Encoder
-    # key_type is now a fixed 95-bit one-hot (1 active bit) — not tunable.
-    # enc_bits_per_feature / enc_w control only the 3 scalar features
-    # (dwell, flight, distance).  Total SDR = 95 + 3*bits, active = 1 + 3*w.
-    "enc_bits_per_feature":   [24, 32, 48, 64],
-    "enc_w":                  [3, 5, 7],
-    # Warmup — must be large enough for TM to learn human patterns
-    "warmup_steps":           [100, 150, 200],        # dropped 30, 50
+    # Encoder (scalar features only; key block is fixed 95-bit one-hot)
+    # enc=24 dominates; try enc=16 (more sparsity); dropped 32, 48, 64
+    "enc_bits_per_feature":   [16, 24],
+    # w=7 dominates top-5; add 9; dropped 3
+    "enc_w":                  [5, 7, 9],
+    # Longer warmup is better; rank 1 uses 200; dropped 100
+    "warmup_steps":           [150, 200, 250, 300],
 }
 
-# Best config so far: dist0022 (test F1=0.6792)
+# Best config so far: dist0027 (82 runs, test F1=0.9474)
 DEFAULT_CONFIG = {
     "sp_columnDimensions":    2048,
-    "sp_numActiveColumns":    40,
+    "sp_numActiveColumns":    30,
     "sp_potentialPct":        0.80,
     "sp_synPermActiveInc":    0.05,
     "sp_synPermConnected":    0.10,
     "sp_synPermInactiveDec":  0.005,
-    "tm_cellsPerColumn":      16,
-    "tm_activationThreshold": 10,
+    "tm_cellsPerColumn":      32,
+    "tm_activationThreshold": 13,
     "tm_initialPermanence":   0.21,
     "tm_connectedPermanence": 0.50,
     "tm_minThreshold":        8,
     "tm_maxNewSynapseCount":  20,
     "tm_permanenceIncrement": 0.10,
     "tm_permanenceDecrement": 0.10,
-    "enc_bits_per_feature":   32,   # scalar features only; key is fixed 95-bit one-hot
-    "enc_w":                  5,
-    "warmup_steps":           100,
+    "enc_bits_per_feature":   24,   # scalar features; key is fixed 95-bit one-hot
+    "enc_w":                  7,
+    "warmup_steps":           200,
     "seed":                   42,
 }
 
