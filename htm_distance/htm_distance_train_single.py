@@ -285,7 +285,7 @@ def main():
             sp.compute(enc_sdr, True, active_columns)
             tm.compute(active_columns, learn=True)
             # Feed raw anomaly into AL so it learns the human distribution
-            al.anomalyProbability(float(tm.anomaly), float(tm.anomaly))
+            al.compute(float(tm.anomaly))
 
     # ── Evaluation helper ─────────────────────────────────────────
     def get_scores(file_list, is_bot):
@@ -307,8 +307,7 @@ def main():
                 sp.compute(enc_sdr, False, active_columns)
                 tm.compute(active_columns, learn=False)
                 # Convert raw anomaly → likelihood using trained AL distribution
-                likelihood = al.anomalyProbability(
-                    float(tm.anomaly), float(tm.anomaly))
+                likelihood = al.compute(float(tm.anomaly))
                 raw.append(likelihood)
             label = 1 if is_bot else 0
             valid = raw[warmup:]

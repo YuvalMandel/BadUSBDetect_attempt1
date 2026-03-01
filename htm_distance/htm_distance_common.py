@@ -340,23 +340,58 @@ class DistanceEncoder:
 # ──────────────────────────────────────────────────────────────────
 # 5. AnomalyLikelihood factory (version-safe)
 # ──────────────────────────────────────────────────────────────────
-def make_anomaly_likelihood(period: int = 10):
+class AnomalyLikelihoodWrapper:
     """
-    Construct an AnomalyLikelihood object compatible with the installed
-    version of htm.core.  The parameter name for the history window has
-    changed across versions:
+    Version-safe wrapper around htm AnomalyLikelihood.
 
+    Exposes a single `compute(raw_anomaly) -> float` interface, hiding
+    differences in method signatures across htm.core versions:
+
+      Modern htm.core  : anomalyProbability(value, anomaly) — two args
+      Some builds      : compute(anomaly)                   — one arg
+      Other builds     : anomalyLikelihood(anomaly)         — one arg
+
+    Picklable: stores only the method name string, not a bound method.
+    If no scoring method is found, `compute()` returns the raw anomaly as-is.
+    """
+
+    # Methods tried in preference order; 2-arg methods must be in _TWO_ARG
+    _CANDIDATES = ["anomalyProbability", "compute",
+                   "anomalyLikelihood",  "update", "likelihood"]
+    _TWO_ARG    = {"anomalyProbability"}
+
+    def __init__(self, al, method_name: str):
+        self._al          = al
+        self._method_name = method_name   # only the name — stays picklable
+
+    def compute(self, raw_anomaly: float) -> float:
+        if self._al is None or self._method_name is None:
+            return raw_anomaly
+        method = getattr(self._al, self._method_name)
+        if self._method_name in self._TWO_ARG:
+            return float(method(raw_anomaly, raw_anomaly))
+        return float(method(raw_anomaly))
+
+
+def make_anomaly_likelihood(period: int = 10) -> AnomalyLikelihoodWrapper:
+    """
+    Construct an AnomalyLikelihoodWrapper compatible with the installed
+    version of htm.core.
+
+    Constructor parameter names vary by version:
       htm.core (htm-community, modern) : learningPeriod=N
       nupic-style / older builds       : claLearningPeriod=N
       Unknown / C++ binding only       : no-arg construction (uses defaults)
 
-    `period` is used wherever the version supports it.
+    Returns an AnomalyLikelihoodWrapper with a `.compute(raw)` interface.
+    If htm.algorithms is unavailable, `.compute()` returns raw anomaly unchanged.
     """
     try:
         from htm.algorithms.anomaly_likelihood import AnomalyLikelihood
     except ImportError:
-        return None          # AL not available in this build
+        return AnomalyLikelihoodWrapper(None, None)
 
+    # ── Build the AL object ───────────────────────────────────────
     try:
         params = set(inspect.signature(AnomalyLikelihood.__init__).parameters)
     except (ValueError, TypeError):
@@ -373,9 +408,16 @@ def make_anomaly_likelihood(period: int = 10):
         kw["estimationSamples"]  = max(period, 10)
         kw["historicWindowSize"] = 8192
         kw["reestimationPeriod"] = period
-    # else: use defaults (period ignored — AL still improves over raw scores)
+    # else: use defaults (period parameter ignored — AL still helps)
 
-    return AnomalyLikelihood(**kw)
+    al = AnomalyLikelihood(**kw)
+
+    # ── Discover which scoring method this version exposes ────────
+    method_name = next(
+        (m for m in AnomalyLikelihoodWrapper._CANDIDATES if hasattr(al, m)),
+        None)
+
+    return AnomalyLikelihoodWrapper(al, method_name)
 
 
 # ──────────────────────────────────────────────────────────────────

@@ -89,7 +89,7 @@ def run_inference(model_data, dist_cache, file_list, is_bot,
             sp.compute(enc_sdr, False, active_cols)
             tm.compute(active_cols, learn=False)
             raw_anomaly = float(tm.anomaly)
-            score = (al.anomalyProbability(raw_anomaly, raw_anomaly)
+            score = (al.compute(raw_anomaly)
                      if al is not None else raw_anomaly)
             raw.append(float(score))
 
@@ -124,7 +124,7 @@ def write_decision_log(filepath, events, model_data, true_label,
         sp.compute(enc_sdr, False, active_cols)
         tm.compute(active_cols, learn=False)
         raw_anomaly = float(tm.anomaly)
-        score = (float(al.anomalyProbability(raw_anomaly, raw_anomaly))
+        score = (al.compute(raw_anomaly)
                  if al is not None else raw_anomaly)
 
         ch = chr(key_idx + 32)
