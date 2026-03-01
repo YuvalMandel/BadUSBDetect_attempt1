@@ -23,22 +23,33 @@ import random
 from pathlib import Path
 
 # ------------------------------------------------------------------
-# Round-4 search space — warmup reset after discovering bot files are short
+# Round-5 search space — bot files have very few valid keystrokes
 #
-# KEY INSIGHT: Most BadUSB attack files contain < 50 keystrokes.
-# With the new short-file rule (files < warmup → always misclassified),
-# any warmup ≥ 50 makes every bot file auto-misclassified → F1 = 0.
-# Warmup must be < 40 to allow post-warmup detection on bot files.
+# DIAGNOSIS (Round 4, 89 runs): ALL configs produced identical val F1=0.1509
+# and test F1=0.5217 with thresh=0.0000.  Identical results regardless of any
+# hyperparameter means the model's anomaly scores do NOT discriminate humans
+# from bots — all decisions are made by the short-file rule:
 #
-# WARMUP: search [5, 10, 15, 20, 25, 30, 35, 40]  (all < 50)
-#   Tradeoff: lower warmup → less training time per file before alarming
-#             but needed to detect short bot attacks at all.
+#   * "Long" bot files (len > warmup) → predicted Bot at thresh=0 (TP)
+#   * "Short" bot files (len ≤ warmup) → auto-predicted Human (FN)
+#   * Human files (all long)          → predicted Bot at thresh=0 (FP)
 #
-# ENCODER  (key is fixed 95-bit one-hot; enc_bits/w control scalar features only)
-#   Keep enc=16, 24 from Round 3 (both showed promise before warmup issue masked results)
-#   Keep enc_w=5, 7, 9
+# F1 is then purely a function of (long_bots / all_files), which is constant
+# regardless of hyperparameters.  The fix: minimize warmup so more bot files
+# become "long" and enter the actual detection zone.
 #
-# SP / TM: keep same ranges as Round 3 — no signal yet due to warmup bug
+# Most BadUSB files contain only a handful of printable keystrokes after
+# filtering (many bot keystrokes are modifiers, function keys, ctrl+v, etc.
+# that parse_file_distance drops).  Observed bot files often have < 5 valid
+# keystrokes → warmup must be ≤ 2 to have any post-warmup data for them.
+#
+# WARMUP: [1, 2, 3, 5]
+#   warmup=0 is excluded: step 0 always has anomaly=1.0 (TM has no prior
+#   context) → first_crossing at any thresh ≤ 1 flags everything as Bot.
+#   warmup=1 skips only that forced-1.0 step; warmup=2–3 give the TM
+#   slightly more context before the detection zone.
+#
+# SP / TM / ENCODER: unchanged from Round 4 — no signal yet to guide pruning.
 # ------------------------------------------------------------------
 PARAM_SPACE = {
     # SpatialPooler
@@ -60,12 +71,18 @@ PARAM_SPACE = {
     # Encoder (scalar features only; key block is fixed 95-bit one-hot)
     "enc_bits_per_feature":   [16, 24],
     "enc_w":                  [5, 7, 9],
-    # Warmup MUST be < 50 (bot files have < 50 keystrokes)
-    "warmup_steps":           [5, 10, 15, 20, 25, 30, 35, 40],
+    # Warmup: must be tiny so even short bot files have post-warmup data.
+    # warmup=0 excluded (step 0 anomaly=1.0 makes every file a "Bot").
+    "warmup_steps":           [1, 2, 3, 5],
+    # AnomalyLikelihood history window.
+    # AL converts raw TM anomaly → probability of being anomalous relative
+    # to the distribution seen during training on human files.
+    # Small period → fast adaptation; range capped at 20 (bot files are short).
+    "al_period":              [5, 10, 15, 20],
 }
 
-# Round-4 default: same SP/TM/enc as best Round-2 config (dist0027),
-# but warmup lowered to 20 (well below the ~50 keystroke bot-file length)
+# Round-5 default: same SP/TM/enc as best Round-2 config (dist0027),
+# warmup=2 (skip only the first two forced-high-anomaly steps)
 DEFAULT_CONFIG = {
     "sp_columnDimensions":    2048,
     "sp_numActiveColumns":    30,
@@ -83,7 +100,8 @@ DEFAULT_CONFIG = {
     "tm_permanenceDecrement": 0.10,
     "enc_bits_per_feature":   24,   # scalar features; key is fixed 95-bit one-hot
     "enc_w":                  7,
-    "warmup_steps":           20,   # must be < ~50 (bot files are short)
+    "warmup_steps":           2,    # skip only first 2 forced-high-anomaly steps
+    "al_period":              10,   # AnomalyLikelihood history window
     "seed":                   42,
 }
 

@@ -38,6 +38,12 @@ def load_results() -> list:
 
 def format_row(rank: int, r: dict) -> str:
     cfg = r.get("config", {})
+    detect = r.get("mean_bot_detect_step", -1)
+    detect_str = f"{detect:5.1f}" if detect >= 0 else "  N/A"
+    caught = r.get("n_bots_caught", "?")
+    total  = r.get("n_bots_total",  "?")
+    b_lik  = r.get("mean_bot_likelihood",   0.0)
+    h_lik  = r.get("mean_human_likelihood", 0.0)
     key = (
         f"sp_act={cfg.get('sp_numActiveColumns','?'):>2} "
         f"pct={cfg.get('sp_potentialPct','?')} "
@@ -45,7 +51,8 @@ def format_row(rank: int, r: dict) -> str:
         f"tm={cfg.get('tm_cellsPerColumn','?')} "
         f"act={cfg.get('tm_activationThreshold','?')} "
         f"min={cfg.get('tm_minThreshold','?')} "
-        f"wu={cfg.get('warmup_steps','?')}"
+        f"wu={cfg.get('warmup_steps','?')} "
+        f"al={cfg.get('al_period','?')}"
     )
     return (
         f"{rank:>4}  "
@@ -53,6 +60,9 @@ def format_row(rank: int, r: dict) -> str:
         f"{r.get('val_f1', 0):.4f}   "
         f"{r.get('test_f1', 0):.4f}   "
         f"{r.get('best_thresh', 0):.4f}  "
+        f"det={detect_str}  "
+        f"caught={caught}/{total}  "
+        f"bLik={b_lik:.3f}  hLik={h_lik:.3f}  "
         f"{key}"
     )
 
@@ -76,12 +86,14 @@ def main():
     total = len(records)
     show  = min(args.top, total)
 
-    sep    = "=" * 105
+    sep    = "=" * 130
     header = (f"{'Rank':>4}  {'Config':>8}  {'Val F1':>7}   "
-              f"{'Test F1':>7}   {'Thresh':>7}  Key params")
+              f"{'Test F1':>7}   {'Thresh':>7}  "
+              f"{'DetStep':>9}  {'Caught':>10}  "
+              f"{'bLik':>8}  {'hLik':>8}  Key params")
     lines  = [sep,
               f"  HTM-Distance Hyperparameter Search — {total} completed runs",
-              sep, header, "-" * 105]
+              sep, header, "-" * 130]
 
     for rank, r in enumerate(records[:show], 1):
         lines.append(format_row(rank, r))
@@ -92,6 +104,10 @@ def main():
               f"  Best model  : {best.get('model_file', '(see dist_models/)')}",
               f"  Best val F1 : {best.get('val_f1', 0):.4f}",
               f"  Best test F1: {best.get('test_f1', 0):.4f}",
+              f"  Mean det step: {best.get('mean_bot_detect_step', -1):.1f}  "
+              f"({best.get('n_bots_caught','?')}/{best.get('n_bots_total','?')} bots caught)",
+              f"  Mean bot likelihood : {best.get('mean_bot_likelihood', 0):.4f}",
+              f"  Mean human likelihood: {best.get('mean_human_likelihood', 0):.4f}",
               sep]
 
     report = "\n".join(lines)
@@ -112,7 +128,9 @@ def main():
                 all_cfg_keys.append(k)
 
     csv_path = os.path.join(RESULTS_DIR, "leaderboard.csv")
-    fieldnames = (["rank", "config_idx", "val_f1", "test_f1", "best_thresh"]
+    fieldnames = (["rank", "config_idx", "val_f1", "test_f1", "best_thresh",
+                   "mean_bot_detect_step", "n_bots_caught", "n_bots_total",
+                   "mean_bot_likelihood", "mean_human_likelihood"]
                   + all_cfg_keys
                   + ["result_file", "model_file"])
 
@@ -121,13 +139,18 @@ def main():
         writer.writeheader()
         for rank, r in enumerate(records, 1):
             row = {
-                "rank":        rank,
-                "config_idx":  r.get("config_idx", ""),
-                "val_f1":      r.get("val_f1", ""),
-                "test_f1":     r.get("test_f1", ""),
-                "best_thresh": r.get("best_thresh", ""),
-                "result_file": r.get("result_file", ""),
-                "model_file":  r.get("model_file", ""),
+                "rank":                  rank,
+                "config_idx":            r.get("config_idx", ""),
+                "val_f1":                r.get("val_f1", ""),
+                "test_f1":               r.get("test_f1", ""),
+                "best_thresh":           r.get("best_thresh", ""),
+                "mean_bot_detect_step":  r.get("mean_bot_detect_step", ""),
+                "n_bots_caught":         r.get("n_bots_caught", ""),
+                "n_bots_total":          r.get("n_bots_total", ""),
+                "mean_bot_likelihood":   r.get("mean_bot_likelihood", ""),
+                "mean_human_likelihood": r.get("mean_human_likelihood", ""),
+                "result_file":           r.get("result_file", ""),
+                "model_file":            r.get("model_file", ""),
             }
             row.update(r.get("config", {}))
             writer.writerow(row)

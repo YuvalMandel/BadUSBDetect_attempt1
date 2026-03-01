@@ -63,11 +63,14 @@ def run_inference(model_data, dist_cache, file_list, is_bot,
                   desc="Inference", warmup=50):
     """
     Run HTM-Distance inference on a list of files.
-    Returns (mean_scores, labels, raw_seqs).
+    Uses AnomalyLikelihood (if saved in model) to convert raw TM anomaly →
+    likelihood score relative to the human distribution seen during training.
+    Returns (mean_scores, labels, likelihood_seqs).
     """
     sp          = model_data["sp"]
     tm          = model_data["tm"]
     encoder     = model_data["encoder"]
+    al          = model_data.get("al")        # may be None for old models
     input_width = model_data["input_width"]
     active_cols = SDR(sp.getColumnDimensions())
 
@@ -85,7 +88,10 @@ def run_inference(model_data, dist_cache, file_list, is_bot,
             enc_sdr.dense = encoder.encode(key_idx, dwell, flight, dist)
             sp.compute(enc_sdr, False, active_cols)
             tm.compute(active_cols, learn=False)
-            raw.append(float(tm.anomaly))
+            raw_anomaly = float(tm.anomaly)
+            score = (al.anomalyProbability(raw_anomaly, raw_anomaly)
+                     if al is not None else raw_anomaly)
+            raw.append(float(score))
 
         label = 1 if is_bot else 0
         valid = raw[warmup:]
@@ -103,6 +109,7 @@ def write_decision_log(filepath, events, model_data, true_label,
     sp          = model_data["sp"]
     tm          = model_data["tm"]
     encoder     = model_data["encoder"]
+    al          = model_data.get("al")
     input_width = model_data["input_width"]
     thresh      = model_data["best_thresh"]
     active_cols = SDR(sp.getColumnDimensions())
@@ -116,7 +123,9 @@ def write_decision_log(filepath, events, model_data, true_label,
         enc_sdr.dense = encoder.encode(key_idx, dwell, flight, dist)
         sp.compute(enc_sdr, False, active_cols)
         tm.compute(active_cols, learn=False)
-        score = float(tm.anomaly)
+        raw_anomaly = float(tm.anomaly)
+        score = (float(al.anomalyProbability(raw_anomaly, raw_anomaly))
+                 if al is not None else raw_anomaly)
 
         ch = chr(key_idx + 32)
 

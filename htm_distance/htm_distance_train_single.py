@@ -48,6 +48,8 @@ except ImportError:
     print("ERROR: htm.core not installed.", file=sys.stderr)
     sys.exit(1)
 
+from htm.algorithms.anomaly_likelihood import AnomalyLikelihood
+
 from common.keystroke_features import RANDOM_SEED
 from htm_distance_common import (
     DistanceEncoder, apply_detection, WARMUP_STEPS,
@@ -73,6 +75,7 @@ def _base_slug(cfg, idx):
         f"_tm{cfg['tm_cellsPerColumn']}"
         f"_act{cfg['tm_activationThreshold']}"
         f"_wu{cfg.get('warmup_steps', WARMUP_STEPS)}"
+        f"_al{cfg.get('al_period', 10)}"
     )
 
 
@@ -88,7 +91,8 @@ def _plot_title(cfg, idx, val_f1, test_f1):
         f"TM: cells={cfg['tm_cellsPerColumn']} actThr={cfg['tm_activationThreshold']} "
         f"minThr={cfg['tm_minThreshold']} newSyn={cfg['tm_maxNewSynapseCount']}\n"
         f"Enc: bits={cfg['enc_bits_per_feature']} w={cfg['enc_w']}  "
-        f"warmup={cfg.get('warmup_steps', WARMUP_STEPS)}  |  "
+        f"warmup={cfg.get('warmup_steps', WARMUP_STEPS)}  "
+        f"al_period={cfg.get('al_period', 10)}  |  "
         f"Val F1={val_f1:.4f}   Test F1={test_f1:.4f}"
     )
 
@@ -197,13 +201,15 @@ def main():
     config_idx = int(
         os.path.splitext(os.path.basename(args.config))[0].split("_")[-1]
     )
-    seed    = cfg.get("seed", RANDOM_SEED)
-    warmup  = cfg.get("warmup_steps", WARMUP_STEPS)
+    seed      = cfg.get("seed", RANDOM_SEED)
+    warmup    = cfg.get("warmup_steps", WARMUP_STEPS)
+    al_period = cfg.get("al_period", 10)
     random.seed(seed)
     np.random.seed(seed)
 
     print(f"\n{'='*60}")
-    print(f"  HTM-Distance Config {config_idx:04d}   (seed={seed}  warmup={warmup})")
+    print(f"  HTM-Distance Config {config_idx:04d}   "
+          f"(seed={seed}  warmup={warmup}  al_period={al_period})")
     for k, v in cfg.items():
         if k != "seed":
             print(f"    {k}: {v}")
@@ -260,6 +266,15 @@ def main():
     )
     active_columns = SDR(sp.getColumnDimensions())
 
+    # AnomalyLikelihood: converts raw TM anomaly → probability of being
+    # anomalous relative to the distribution seen on training (human) data.
+    al = AnomalyLikelihood(
+        learningPeriod    = al_period,
+        estimationSamples = max(al_period, 10),
+        historicWindowSize= 8192,
+        reestimationPeriod= al_period,
+    )
+
     # ── Training ──────────────────────────────────────────────────
     print("Training...")
     shuffled_train = list(train_human)
@@ -275,9 +290,16 @@ def main():
             enc_sdr.dense = encoder.encode(key_idx, dwell, flight, dist)
             sp.compute(enc_sdr, True, active_columns)
             tm.compute(active_columns, learn=True)
+            # Feed raw anomaly into AL so it learns the human distribution
+            al.anomalyProbability(float(tm.anomaly), float(tm.anomaly))
 
     # ── Evaluation helper ─────────────────────────────────────────
     def get_scores(file_list, is_bot):
+        """
+        Run SP+TM+AL on each file.  Returns per-file mean likelihood scores,
+        labels, and per-file AL likelihood timeseries (used by apply_detection).
+        Short files (len ≤ warmup) are included; apply_detection handles them.
+        """
         scores, labels, seqs = [], [], []
         for fp in file_list:
             events = dist_cache.get(fp)
@@ -290,7 +312,10 @@ def main():
                 enc_sdr.dense = encoder.encode(key_idx, dwell, flight, dist)
                 sp.compute(enc_sdr, False, active_columns)
                 tm.compute(active_columns, learn=False)
-                raw.append(tm.anomaly)
+                # Convert raw anomaly → likelihood using trained AL distribution
+                likelihood = al.anomalyProbability(
+                    float(tm.anomaly), float(tm.anomaly))
+                raw.append(likelihood)
             label = 1 if is_bot else 0
             valid = raw[warmup:]
             # Always include — short files are always misclassified by apply_detection
@@ -333,6 +358,42 @@ def main():
     print(classification_report(all_test_labels, test_preds,
                                 target_names=["Human", "Bot"]))
 
+    # ── Bot detection keystroke printout (→ SLURM .out file) ──────
+    print(f"\n--- Bot Detection Steps (test set, {len(test_b_sq)} bots, "
+          f"warmup={warmup}, thresh={best_thresh:.4f}) ---")
+    caught_steps, missed_bot_lens = [], []
+    for i, (seq, label) in enumerate(zip(all_test_seqs, all_test_labels)):
+        if label != 1:
+            continue
+        post = seq[warmup:]
+        if not post:
+            missed_bot_lens.append(len(seq))
+            print(f"  Bot {len(caught_steps)+len(missed_bot_lens):3d}: "
+                  f"NOT DETECTED  (short file: {len(seq)} keystrokes ≤ warmup={warmup})")
+            continue
+        detect_step = next(
+            (warmup + j for j, s in enumerate(post) if s >= best_thresh), -1)
+        if detect_step >= 0:
+            caught_steps.append(detect_step)
+            print(f"  Bot {len(caught_steps)+len(missed_bot_lens):3d}: "
+                  f"detected at keystroke {detect_step:4d}  "
+                  f"(likelihood={seq[detect_step]:.3f}, file_len={len(seq)})")
+        else:
+            missed_bot_lens.append(len(seq))
+            print(f"  Bot {len(caught_steps)+len(missed_bot_lens):3d}: "
+                  f"NOT DETECTED  (max_lik={max(post):.3f} < {best_thresh:.4f}, "
+                  f"file_len={len(seq)})")
+
+    mean_detect_step = float(np.mean(caught_steps)) if caught_steps else -1.0
+    n_caught = len(caught_steps)
+    n_bots   = len(test_b_sq)
+    det_str  = f"{mean_detect_step:.1f}" if caught_steps else "N/A"
+    print(f"  Caught {n_caught}/{n_bots} bots  |  Mean detection keystroke: {det_str}")
+    b_lik_str = f"{float(np.mean(test_b_sc)):.4f}" if test_b_sc else "N/A"
+    h_lik_str = f"{float(np.mean(test_h_sc)):.4f}" if test_h_sc else "N/A"
+    print(f"  Mean bot likelihood   (post-warmup): {b_lik_str}")
+    print(f"  Mean human likelihood (post-warmup): {h_lik_str}")
+
     # ── Save outputs ──────────────────────────────────────────────
     base_slug  = _base_slug(cfg, config_idx)
     fname_slug = _full_slug(base_slug, best_f1, test_f1)
@@ -341,11 +402,12 @@ def main():
     model_path = os.path.join(MODELS_DIR, f"{fname_slug}.pkl")
     with open(model_path, 'wb') as fh:
         pickle.dump({
-            "sp": sp, "tm": tm, "encoder": encoder,
+            "sp": sp, "tm": tm, "encoder": encoder, "al": al,
             "input_width": input_width,
             "best_thresh": best_thresh,
             "detection_mode": "first_crossing",
             "warmup_steps": warmup,
+            "al_period": al_period,
             "config": cfg,
             "config_idx": config_idx,
             "val_f1": float(best_f1),
@@ -354,12 +416,17 @@ def main():
     print(f"  Model → {model_path}")
 
     result = {
-        "config_idx": config_idx,
-        "config":     cfg,
-        "val_f1":     float(best_f1),
-        "test_f1":    float(test_f1),
-        "best_thresh":float(best_thresh),
-        "model_file": model_path,
+        "config_idx":        config_idx,
+        "config":            cfg,
+        "val_f1":            float(best_f1),
+        "test_f1":           float(test_f1),
+        "best_thresh":       float(best_thresh),
+        "mean_bot_detect_step": mean_detect_step,
+        "n_bots_caught":     n_caught,
+        "n_bots_total":      n_bots,
+        "mean_bot_likelihood":  float(np.mean(test_b_sc)) if test_b_sc else 0.0,
+        "mean_human_likelihood":float(np.mean(test_h_sc)) if test_h_sc else 0.0,
+        "model_file":        model_path,
     }
     results_path = os.path.join(RESULTS_DIR, f"{fname_slug}.json")
     with open(results_path, 'w') as fh:
