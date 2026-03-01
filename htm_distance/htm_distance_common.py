@@ -11,6 +11,7 @@ Input to the HTM — one step per keystroke event (no windowing, no stats):
 Unknown / modifier keys are silently skipped — no unknown types reach the HTM.
 """
 
+import inspect
 import os
 import sys
 import math
@@ -337,7 +338,48 @@ class DistanceEncoder:
 
 
 # ──────────────────────────────────────────────────────────────────
-# 5. Detection (first-crossing, same logic as htm/htm_common.py)
+# 5. AnomalyLikelihood factory (version-safe)
+# ──────────────────────────────────────────────────────────────────
+def make_anomaly_likelihood(period: int = 10):
+    """
+    Construct an AnomalyLikelihood object compatible with the installed
+    version of htm.core.  The parameter name for the history window has
+    changed across versions:
+
+      htm.core (htm-community, modern) : learningPeriod=N
+      nupic-style / older builds       : claLearningPeriod=N
+      Unknown / C++ binding only       : no-arg construction (uses defaults)
+
+    `period` is used wherever the version supports it.
+    """
+    try:
+        from htm.algorithms.anomaly_likelihood import AnomalyLikelihood
+    except ImportError:
+        return None          # AL not available in this build
+
+    try:
+        params = set(inspect.signature(AnomalyLikelihood.__init__).parameters)
+    except (ValueError, TypeError):
+        params = set()
+
+    kw: dict = {}
+    if "learningPeriod" in params:
+        kw["learningPeriod"]     = period
+        kw["estimationSamples"]  = max(period, 10)
+        kw["historicWindowSize"] = 8192
+        kw["reestimationPeriod"] = period
+    elif "claLearningPeriod" in params:
+        kw["claLearningPeriod"]  = period
+        kw["estimationSamples"]  = max(period, 10)
+        kw["historicWindowSize"] = 8192
+        kw["reestimationPeriod"] = period
+    # else: use defaults (period ignored — AL still improves over raw scores)
+
+    return AnomalyLikelihood(**kw)
+
+
+# ──────────────────────────────────────────────────────────────────
+# 6. Detection (first-crossing, same logic as htm/htm_common.py)
 # ──────────────────────────────────────────────────────────────────
 WARMUP_STEPS = 50   # keystrokes to skip before alarming (more than original
                     # because each step is a single keystroke, not a window)

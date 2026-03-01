@@ -48,11 +48,9 @@ except ImportError:
     print("ERROR: htm.core not installed.", file=sys.stderr)
     sys.exit(1)
 
-from htm.algorithms.anomaly_likelihood import AnomalyLikelihood
-
 from common.keystroke_features import RANDOM_SEED
 from htm_distance_common import (
-    DistanceEncoder, apply_detection, WARMUP_STEPS,
+    DistanceEncoder, apply_detection, make_anomaly_likelihood, WARMUP_STEPS,
 )
 
 # ── Output directories ────────────────────────────────────────────
@@ -268,12 +266,8 @@ def main():
 
     # AnomalyLikelihood: converts raw TM anomaly → probability of being
     # anomalous relative to the distribution seen on training (human) data.
-    al = AnomalyLikelihood(
-        learningPeriod    = al_period,
-        estimationSamples = max(al_period, 10),
-        historicWindowSize= 8192,
-        reestimationPeriod= al_period,
-    )
+    # make_anomaly_likelihood() handles different htm.core API versions safely.
+    al = make_anomaly_likelihood(al_period)
 
     # ── Training ──────────────────────────────────────────────────
     print("Training...")
