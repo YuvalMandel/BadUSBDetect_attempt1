@@ -2,7 +2,7 @@
 htm_distance/htm_distance_generate_configs.py
 Generate random HTM-distance hyperparameter configs and a SLURM script.
 
-Cumulative workflow — results are NEVER deleted:
+Fresh-start workflow (delete old results before re-running):
   Each run finds the highest config_idx already present in dist_results/,
   removes old dist_configs/*.json files, then writes new configs numbered
   from last_idx + 1 onward.
@@ -23,37 +23,27 @@ import random
 from pathlib import Path
 
 # ------------------------------------------------------------------
-# Round-3 search space — updated from 82-run leaderboard (corrected encoder)
+# Round-4 search space — warmup reset after discovering bot files are short
+#
+# KEY INSIGHT: Most BadUSB attack files contain < 50 keystrokes.
+# With the new short-file rule (files < warmup → always misclassified),
+# any warmup ≥ 50 makes every bot file auto-misclassified → F1 = 0.
+# Warmup must be < 40 to allow post-warmup detection on bot files.
+#
+# WARMUP: search [5, 10, 15, 20, 25, 30, 35, 40]  (all < 50)
+#   Tradeoff: lower warmup → less training time per file before alarming
+#             but needed to detect short bot attacks at all.
 #
 # ENCODER  (key is fixed 95-bit one-hot; enc_bits/w control scalar features only)
-#   enc=24  : 7 of top-10 configs → DOMINANT; total SDR = 167 bits, 22 active (13.2%)
-#   enc=32  : only ranks 13-19
-#   enc=48,64: never in top-10 → drop
-#   → add enc=16 (even higher sparsity ~16%), keep 24; drop 32, 48, 64
-#   enc_w=7 : dominates ranks 1-5; enc_w=5 fills ranks 6-17; enc_w=3 weak
-#   → keep 5, 7; add 9 to probe wider; drop 3
+#   Keep enc=16, 24 from Round 3 (both showed promise before warmup issue masked results)
+#   Keep enc_w=5, 7, 9
 #
-# WARMUP
-#   warmup=200 → rank 1 (best)
-#   warmup=150 → many in top-10
-#   warmup=100 → only mid-table; drop
-#   → keep 150, 200; add 250, 300 (longer may help further)
-#
-# SP
-#   sp_act=30: 7 of top-20 including rank 1 → hot zone
-#   sp_act=20: rank 2; sp_act=40: ranks 3,4,9
-#   → keep 20, 30, 35, 40; add 25 to probe between 20 and 30
-#   pct=0.65 vs 0.80: both equally viable (10/10 split in top 20) → keep both
-#
-# TM
-#   tm_cells=16: 11/20; tm_cells=32: 8/20 (rank 1 uses 32) → both viable
-#   act=10 vs act=13: ~equal split → both viable
-#   min=8 vs min=10: ~equal split → both viable
+# SP / TM: keep same ranges as Round 3 — no signal yet due to warmup bug
 # ------------------------------------------------------------------
 PARAM_SPACE = {
     # SpatialPooler
     "sp_columnDimensions":    [2048],
-    "sp_numActiveColumns":    [20, 25, 30, 35, 40],   # added 25
+    "sp_numActiveColumns":    [20, 25, 30, 35, 40],
     "sp_potentialPct":        [0.65, 0.80],
     "sp_synPermActiveInc":    [0.02, 0.05, 0.10],
     "sp_synPermConnected":    [0.10, 0.20],
@@ -68,15 +58,14 @@ PARAM_SPACE = {
     "tm_permanenceIncrement": [0.05, 0.10],
     "tm_permanenceDecrement": [0.05, 0.10],
     # Encoder (scalar features only; key block is fixed 95-bit one-hot)
-    # enc=24 dominates; try enc=16 (more sparsity); dropped 32, 48, 64
     "enc_bits_per_feature":   [16, 24],
-    # w=7 dominates top-5; add 9; dropped 3
     "enc_w":                  [5, 7, 9],
-    # Longer warmup is better; rank 1 uses 200; dropped 100
-    "warmup_steps":           [150, 200, 250, 300],
+    # Warmup MUST be < 50 (bot files have < 50 keystrokes)
+    "warmup_steps":           [5, 10, 15, 20, 25, 30, 35, 40],
 }
 
-# Best config so far: dist0027 (82 runs, test F1=0.9474)
+# Round-4 default: same SP/TM/enc as best Round-2 config (dist0027),
+# but warmup lowered to 20 (well below the ~50 keystroke bot-file length)
 DEFAULT_CONFIG = {
     "sp_columnDimensions":    2048,
     "sp_numActiveColumns":    30,
@@ -94,7 +83,7 @@ DEFAULT_CONFIG = {
     "tm_permanenceDecrement": 0.10,
     "enc_bits_per_feature":   24,   # scalar features; key is fixed 95-bit one-hot
     "enc_w":                  7,
-    "warmup_steps":           200,
+    "warmup_steps":           20,   # must be < ~50 (bot files are short)
     "seed":                   42,
 }
 
