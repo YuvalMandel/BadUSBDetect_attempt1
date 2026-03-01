@@ -206,7 +206,7 @@ def plot_results(h_seqs, b_seqs, h_scores, b_scores,
     ax.legend(); ax.grid(True)
 
     ax = axes[2]
-    ths = np.linspace(0, 1, 200)
+    ths = np.linspace(0, 1, 500)
     f1s = [
         f1_score(all_labels,
                  apply_detection(all_seqs, "first_crossing", t, warmup,

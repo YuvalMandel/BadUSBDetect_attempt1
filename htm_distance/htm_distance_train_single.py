@@ -138,7 +138,7 @@ def plot_results(val_h_seqs, val_b_seqs,
 
     # Panel 3 — F1 vs threshold
     ax = axes[2]
-    ths = np.linspace(0, 1, 200)
+    ths = np.linspace(0, 1, 500)
     f1s = [
         f1_score(all_val_labels,
                  apply_detection(all_val_seqs, 'first_crossing', t, warmup,
@@ -325,7 +325,7 @@ def main():
     all_val_labels = val_h_lb + val_b_lb
 
     best_f1, best_thresh = 0.0, 0.0
-    for th in np.linspace(0, 1, 100):
+    for th in np.linspace(0, 1, 500):   # 500 pts → step ≈ 0.002; matches plot
         preds = apply_detection(all_val_seqs, 'first_crossing', th, warmup,
                                 labels=all_val_labels)
         f1    = f1_score(all_val_labels, preds, zero_division=0)
