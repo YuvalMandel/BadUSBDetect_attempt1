@@ -105,13 +105,14 @@ def run_inference(model_data, dist_cache, file_list, is_bot,
 
 # ── Decision log (per-keystroke) ──────────────────────────────────
 def write_decision_log(filepath, events, model_data, true_label,
-                       output_path, warmup=50):
+                       output_path, warmup=50, thresh=None):
     sp          = model_data["sp"]
     tm          = model_data["tm"]
     encoder     = model_data["encoder"]
     al          = model_data.get("al")
     input_width = model_data["input_width"]
-    thresh      = model_data["best_thresh"]
+    if thresh is None:
+        thresh  = model_data["best_thresh"]
     active_cols = SDR(sp.getColumnDimensions())
 
     tm.reset()
@@ -299,6 +300,8 @@ def main():
                         help="Root for bot .txt files (all_other_files mode)")
     parser.add_argument("--write_decision_log", action="store_true",
                         help="Write per-keystroke decision log for one human + one bot")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Override the model's saved threshold (e.g. 0.0245)")
     args = parser.parse_args()
 
     # ── Load model ────────────────────────────────────────────────
@@ -307,11 +310,15 @@ def main():
     with open(args.model, "rb") as fh:
         md = pickle.load(fh)
 
-    thresh = md["best_thresh"]
+    thresh = args.threshold if args.threshold is not None else md["best_thresh"]
     warmup = md.get("warmup_steps", 50)
     slug   = os.path.splitext(os.path.basename(args.model))[0]
     print(f"\nModel : {args.model}")
-    print(f"Thresh: {thresh:.4f}   Warmup: {warmup}   Mode: {args.mode}\n")
+    if args.threshold is not None:
+        print(f"Thresh: {thresh:.4f}  [MANUAL OVERRIDE — model default was {md['best_thresh']:.4f}]")
+    else:
+        print(f"Thresh: {thresh:.4f}")
+    print(f"Warmup: {warmup}   Mode: {args.mode}\n")
 
     # ── Load split ────────────────────────────────────────────────
     if not os.path.exists(args.split):
@@ -359,10 +366,10 @@ def main():
             lb = next((f for f in val_bots  if cache.get(f)), None)
             if lh:
                 write_decision_log(lh, cache[lh], md, 0,
-                    os.path.join(LOGS_DIR, f"{slug}_human_log.txt"), warmup)
+                    os.path.join(LOGS_DIR, f"{slug}_human_log.txt"), warmup, thresh)
             if lb:
                 write_decision_log(lb, cache[lb], md, 1,
-                    os.path.join(LOGS_DIR, f"{slug}_bot_log.txt"), warmup)
+                    os.path.join(LOGS_DIR, f"{slug}_bot_log.txt"), warmup, thresh)
 
     # ── MODE: all_non_train ───────────────────────────────────────
     elif args.mode == "all_non_train":
@@ -396,10 +403,10 @@ def main():
             lb = next((f for f in nt_bot   if cache.get(f)), None)
             if lh:
                 write_decision_log(lh, cache[lh], md, 0,
-                    os.path.join(LOGS_DIR, f"{slug}_human_log.txt"), warmup)
+                    os.path.join(LOGS_DIR, f"{slug}_human_log.txt"), warmup, thresh)
             if lb:
                 write_decision_log(lb, cache[lb], md, 1,
-                    os.path.join(LOGS_DIR, f"{slug}_bot_log.txt"), warmup)
+                    os.path.join(LOGS_DIR, f"{slug}_bot_log.txt"), warmup, thresh)
 
     # ── MODE: all_other_files ─────────────────────────────────────
     elif args.mode == "all_other_files":

@@ -37,8 +37,8 @@ export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 
 # ---- Edit these two lines before submitting --------------------
-MODEL="dist_models/dist0027_sp30_enc24w7_tm32_act13_wu200_vf10.4444_tf10.9474.pkl"
-MODE="all_non_train"   # orig | all_non_train | all_other_files
+MODEL="dist_models/dist0121_sp40_enc16w9_tm16_act13_wu5_al15_vf10.8571_tf10.9189.pkl"
+MODE="all_other_files"   # orig | all_non_train | all_other_files
 # ----------------------------------------------------------------
 
 echo "Model: $MODEL"
