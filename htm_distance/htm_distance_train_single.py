@@ -324,13 +324,28 @@ def main():
     all_val_seqs   = val_h_sq + val_b_sq
     all_val_labels = val_h_lb + val_b_lb
 
+    # ── Two-stage threshold search ─────────────────────────────────
+    # Stage 1: coarse sweep [0, 1] with 200 points (step ≈ 0.005)
     best_f1, best_thresh = 0.0, 0.0
-    for th in np.linspace(0, 1, 500):   # 500 pts → step ≈ 0.002; matches plot
+    coarse_pts = np.linspace(0, 1, 200)
+    for th in coarse_pts:
         preds = apply_detection(all_val_seqs, 'first_crossing', th, warmup,
                                 labels=all_val_labels)
         f1    = f1_score(all_val_labels, preds, zero_division=0)
         if f1 > best_f1:
             best_f1, best_thresh = f1, th
+
+    # Stage 2: fine sweep in ±2 coarse steps around the best found
+    coarse_step = 1.0 / (len(coarse_pts) - 1)
+    fine_lo = max(0.0, best_thresh - 2 * coarse_step)
+    fine_hi = min(1.0, best_thresh + 2 * coarse_step)
+    for th in np.linspace(fine_lo, fine_hi, 1000):
+        preds = apply_detection(all_val_seqs, 'first_crossing', th, warmup,
+                                labels=all_val_labels)
+        f1    = f1_score(all_val_labels, preds, zero_division=0)
+        if f1 > best_f1:
+            best_f1, best_thresh = f1, th
+    # Total evaluations: 200 + 1000 = 1200; effective resolution near peak ≈ 0.00001
 
     # ── Test ──────────────────────────────────────────────────────
     print("Testing...")

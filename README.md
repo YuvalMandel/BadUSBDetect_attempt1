@@ -170,24 +170,42 @@ rm mlp_plots/mlp*_confusion.png
 
 ## How the detection threshold is chosen
 
-The HTM and HTM-Distance models produce an anomaly score per timestep (0–1).
-A file is flagged as a bot when the first post-warmup score exceeds a threshold
-(`first_crossing` mode). The threshold is **not** a pre-training hyperparameter
-because its optimal value is unknowable before training — it depends on where
-the model's output distribution lands.
+The HTM and HTM-Distance models produce a score per timestep (0–1; raw anomaly
+or AnomalyLikelihood). A file is flagged as a bot when the first post-warmup
+score exceeds a threshold (`first_crossing` mode). The threshold is **not** a
+pre-training hyperparameter because its optimal value is unknowable before
+training — it depends on where the model's output distribution lands.
 
-Instead, after training, the threshold is found by:
+Instead, after training, the threshold is found by a **two-stage search**:
 
 1. Running the trained model (no learning) on the **validation set**.
-2. Sweeping 100 candidate thresholds from 0 to 1.
-3. Picking the threshold that maximises **validation F1**.
-4. Applying that threshold to the **test set** to get the reported test F1.
+2. **Coarse pass**: sweep 200 evenly-spaced candidate thresholds from 0 to 1.
+3. **Fine pass**: sweep 1000 points in a ±2-step window around the coarse best.
+   This gives an effective precision of ~0.00001.
+4. Picking the threshold that maximises **validation F1** across both passes.
+5. Applying that threshold to the **test set** to get the reported test F1.
 
 This is standard post-hoc threshold calibration. The threshold is saved in the
 model `.pkl` alongside the SP and TM objects so it can be used at inference time
-without re-calibration. The ~0.96–0.98 values seen in the leaderboard reflect
-that well-trained models produce nearly binary output: human files score near 0,
-bot files near 1, and any threshold in the gap gives the same result.
+without re-calibration.
+
+### Short-file misclassification rule
+
+Files with fewer printable keystrokes than `warmup_steps` never enter the
+post-warmup detection zone. Such files are **always counted as misclassified**,
+regardless of the true label:
+
+- A bot file that is too short → the model predicts *human* (false negative)
+- A human file that is too short → the model predicts *bot* (false positive)
+
+This is the conservative choice: a file that provides no evidence should not
+inflate accuracy. It also penalises configs whose `warmup_steps` is too large
+for the typical file length in the dataset.
+
+> **Note for BadUSB files**: BadUSB attacks use modifier / function keys
+> (Ctrl, Win, Arrow, Enter) which are filtered out during parsing. The effective
+> keystroke count is often 3–10. Therefore `warmup_steps` must be ≤ 5 to avoid
+> all bot files being classified as short-file misses.
 
 ---
 
@@ -205,7 +223,7 @@ statistical windows. Each timestep fed to the HTM encodes:
 | **Total** | | **95 + 3 × enc_bits** | **1 + 3 × enc_w** |
 
 > The key one-hot block is fixed at 95 bits regardless of `enc_bits_per_feature`.
-> Best so far: `enc_bits=24, enc_w=7` → SDR = 95+72 = **167 bits, 22 active (13.2% sparsity)**.
+> Best so far: `enc_bits=16, enc_w=9` → SDR = 95+48 = **143 bits, 28 active (19.6% sparsity)**.
 
 ### Step 1 — Prepare data (run once; requires `split.pkl`)
 
@@ -249,6 +267,24 @@ python htm_distance/htm_distance_collect_results.py --top 20
 
 Reads all `dist_results/dist*.json` and writes `dist_results/leaderboard.txt` and `.csv`.
 
+Leaderboard columns include:
+
+| Column | Description |
+|--------|-------------|
+| `Val F1` / `Test F1` | F1 score on validation / test split |
+| `Thresh` | Chosen detection threshold |
+| `det=` | Mean keystroke index at which the first bot was detected (post-warmup) |
+| `caught=X/Y` | Number of bot files correctly flagged / total bot files |
+| `bLik=` | Mean AnomalyLikelihood score for bot files |
+| `hLik=` | Mean AnomalyLikelihood score for human files |
+
+The SLURM `.out` log for each job also prints per-bot detection details, e.g.:
+```
+  Bot 0: detected at keystroke 5  (likelihood=0.842, file_len=8)
+  Bot 1: NOT DETECTED  (max_lik=0.021 < 0.0281, file_len=6)
+  Bot 2: NOT DETECTED  (short file: 3 ≤ warmup=5)
+```
+
 ### Step 5 — Test a saved model
 
 ```bash
@@ -276,16 +312,20 @@ python htm_distance/htm_distance_test_model.py \
 #### Decision log (`--write_decision_log`)
 
 Written to `logs/<slug>_human_log.txt` and `logs/<slug>_bot_log.txt`.
-One row per keystroke:
+One row per keystroke (score column shows AnomalyLikelihood, or raw anomaly if AL
+is not available in the pkl):
 
 ```
- Step  Key    Dwell   Flight    Dist    Score          Status  Reason
-------  ---  -------  -------  ------  -------  --------------  --------------------------------------------------
-     0  'I'    141.0      0.0   0.000   0.0000          WARMUP  warmup (1/200)
-   200  'H'     78.0    110.0   2.693   0.1250      no crossing  score 0.1250 < 0.9697
-   201  'E'    110.0      0.0   2.000   0.9800             BOT  first crossing: 0.9800 >= 0.9697
-   202  ' '    109.0      0.0   4.243   0.9800             BOT  already triggered at step 201
+ Step  Key    Dwell   Flight    Dist  Likelihood          Status  Reason
+------  ---  -------  -------  ------  ----------  --------------  --------------------------------------------------
+     0  'I'    141.0      0.0   0.000      0.0000          WARMUP  warmup (1/5)
+     5  'H'     78.0    110.0   2.693      0.0210      no crossing  score 0.0210 < 0.0281
+     6  'E'    110.0      0.0   2.000      0.8420             BOT  first crossing: 0.8420 >= 0.0281
+     7  ' '    109.0      0.0   4.243      0.8420             BOT  already triggered at step 6
 ```
+
+Short files (fewer keystrokes than `warmup_steps`) are noted in the log header
+and automatically counted as misclassified (see [Short-file rule](#short-file-misclassification-rule)).
 
 > Key difference from the original HTM tester: no reference pool or feature windows
 > are needed. `parse_file_distance` runs directly on raw `.txt` files, so
@@ -305,40 +345,42 @@ Then start from Step 1 above.
 
 > `split.pkl` and `features_cache.pkl` are **not** affected and do not need to be deleted.
 
-### Best config so far (Round 3, 82 runs, corrected one-hot encoder)
+### Best config so far (Round 5, 83 runs)
 
-`dist0027`: `sp_act=30, pct=0.8, enc=24w7, tm=32, act=13, min=8, wu=200`
-→ **val F1=0.4444, test F1=0.9474**
+`dist0121`: `sp_act=40, pct=0.8, enc=16w9, tm=16, act=13, min=8, wu=5, al=15`
+→ **val F1=0.8571, test F1=0.9189**, mean detection keystroke=5.0, caught 17/18 bots
 
 ```python
 import pickle
-with open("dist_models/dist0027_sp30_enc24w7_tm32_act13_wu200_vf10.4444_tf10.9474.pkl", "rb") as f:
+with open("dist_models/dist0121_sp40_enc16w9_tm16_act13_wu5_al15_vf10.8571_tf10.9189.pkl", "rb") as f:
     m = pickle.load(f)
-sp, tm, encoder, thresh = m["sp"], m["tm"], m["encoder"], m["best_thresh"]
+sp, tm, encoder, thresh, al = m["sp"], m["tm"], m["encoder"], m["best_thresh"], m["al"]
 ```
 
-### HTM-Distance search space (Round 3)
+### HTM-Distance search space (Round 5)
 
 | Group | Parameter | Values | Notes |
 |-------|-----------|--------|-------|
-| SP | `numActiveColumns` | 20, **25**, 30, 35, 40 | added 25 to probe 20–30 gap |
-| SP | `potentialPct` | 0.65, 0.80 | both equally viable |
+| SP | `numActiveColumns` | 20, 25, 30, 35, 40 | |
+| SP | `potentialPct` | 0.65, 0.80 | |
 | SP | `synPermActiveInc` | 0.02, 0.05, 0.10 | |
 | SP | `synPermConnected` | 0.10, 0.20 | |
 | SP | `synPermInactiveDec` | 0.003, 0.005, 0.010 | |
-| TM | `cellsPerColumn` | 16, 32 | both viable (rank 1=32, rank 2=16) |
-| TM | `activationThreshold` | 10, 13 | both viable |
-| TM | `minThreshold` | 8, 10 | both viable; 8 slightly more in top-10 |
+| TM | `cellsPerColumn` | 16, 32 | |
+| TM | `activationThreshold` | 10, 13 | |
+| TM | `minThreshold` | 8, 10 | |
 | TM | `maxNewSynapseCount` | 15, 20, 25, 30 | |
 | TM | `initialPermanence` | 0.21, 0.31, 0.40 | |
 | TM | `connectedPermanence` | 0.30, 0.50 | |
 | TM | `permanenceIncrement` | 0.05, 0.10 | |
 | TM | `permanenceDecrement` | 0.05, 0.10 | |
-| Enc | `enc_bits_per_feature` | **16**, 24, 32 | enc=24 dominates top-10; **try 16** (more sparsity); dropped 48, 64 |
-| Enc | `enc_w` | 5, 7, **9** | w=7 dominates top-5; **try 9**; dropped 3 |
-| Det | `warmup_steps` | 150, 200, **250**, **300** | longer=better; rank 1 uses 200; dropped 100 |
+| Enc | `enc_bits_per_feature` | 16, 24, 32 | |
+| Enc | `enc_w` | 5, 7, 9 | |
+| Det | `warmup_steps` | **1, 2, 3, 5** | Must be ≤ 5 — BadUSB files have 3–10 printable keystrokes |
+| Det | `al_period` | **5, 10, 15, 20** | AnomalyLikelihood history window; **new in Round 5** |
 
-**Bold** = added in Round 3. Dropped: enc=48, enc=64, enc_w=3, warmup=100.
+**Bold** = added/changed in Round 5. Warmup reduced from 150–300 → 1–5 because
+BadUSB attack files contain very few printable keystrokes after filtering modifiers.
 
 ---
 
