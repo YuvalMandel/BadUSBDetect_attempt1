@@ -5,9 +5,10 @@ Two models are implemented:
 
 | Model | Folder | Approach |
 |-------|--------|----------|
-| HTM (anomaly)          | `htm/`          | Unsupervised; learns normal typing, flags deviations |
-| HTM-Distance (anomaly) | `htm_distance/` | Same as HTM but raw per-keystroke events: key type + dwell + flight + QWERTY distance |
-| MLP (supervised)       | `mlp/`          | Binary classifier trained on labelled windows |
+| HTM (anomaly)               | `htm/`                | Unsupervised; learns normal typing, flags deviations |
+| HTM-Distance (anomaly)      | `htm_distance/`       | Same as HTM but raw per-keystroke events: key type + dwell + flight + QWERTY distance |
+| HTM-Distance-Stats (anomaly)| `htm_distance_stats/` | Hybrid: sliding windows + 21-dim stats (dwell, flight, QWERTY dist) fed into HTM |
+| MLP (supervised)            | `mlp/`                | Binary classifier trained on labelled windows |
 
 ---
 
@@ -49,6 +50,14 @@ source /path/to/.venv/bin/activate
 │   ├── htm_distance_collect_results.py   Aggregate dist_results/  →  leaderboard
 │   └── htm_distance_test_model.py        Test a saved model (3 evaluation modes)
 │
+├── htm_distance_stats/
+│   ├── htm_distance_stats_common.py         StatsEncoder, reference pool, feature extraction, detection
+│   ├── htm_distance_stats_prepare_data.py   Parse files → stats_cache.pkl  (reuses dist_cache.pkl if present)
+│   ├── htm_distance_stats_train_single.py   SLURM worker — train one HTM-distance-stats config
+│   ├── htm_distance_stats_generate_configs.py  Generate ds_configs/ + slurm/ds_submit_array.sh
+│   ├── htm_distance_stats_collect_results.py   Aggregate ds_results/  →  leaderboard
+│   └── htm_distance_stats_test_model.py        Test a saved model (3 evaluation modes)
+│
 ├── mlp/
 │   ├── mlp_prepare_data.py    Parse raw files → train/val/test CSV + reference pool
 │   ├── mlp_balance_train.py   Balance the training CSV (trim human majority)
@@ -71,6 +80,11 @@ source /path/to/.venv/bin/activate
 ├── dist_models/           Trained HTM-distance pkl files     [gitignored]
 ├── dist_plots/            HTM-distance PNG plots             [gitignored]
 ├── dist_results/          HTM-distance per-run JSON + leaderboard  [gitignored]
+├── ds_configs/            JSON ds configs for current batch  [gitignored per-run]
+│   └── config_NNNN.json
+├── ds_models/             Trained HTM-distance-stats pkl files [gitignored]
+├── ds_plots/              HTM-distance-stats PNG plots         [gitignored]
+├── ds_results/            HTM-distance-stats per-run JSON + leaderboard [gitignored]
 ├── mlp_models/            Trained MLP model pth files        [gitignored]
 ├── mlp_plots/             MLP PNG plots                      [gitignored]
 ├── mlp_results/           MLP per-run JSON + leaderboard     [gitignored]
@@ -78,6 +92,7 @@ source /path/to/.venv/bin/activate
 └── slurm/
     ├── submit_array.sh        Generated HTM SLURM submission script
     ├── dist_submit_array.sh   Generated HTM-distance SLURM submission script
+    ├── ds_submit_array.sh     Generated HTM-distance-stats SLURM submission script
     └── mlp_submit_array.sh    Generated MLP SLURM submission script
 ```
 
@@ -206,6 +221,110 @@ for the typical file length in the dataset.
 > (Ctrl, Win, Arrow, Enter) which are filtered out during parsing. The effective
 > keystroke count is often 3–10. Therefore `warmup_steps` must be ≤ 5 to avoid
 > all bot files being classified as short-file misses.
+
+---
+
+## HTM-Distance-Stats hyperparameter search on Newton SLURM
+
+Hybrid variant that combines:
+- The **QWERTY-distance parser** from `htm_distance/` (only printable ASCII keys, computes Euclidean keyboard distance between successive keys)
+- The **statistical-window approach** from `htm/` (sliding windows; 7-dim stats per channel)
+
+Each HTM timestep is a sliding window of `window_size` printable keystrokes.
+Three 7-dimensional feature vectors are extracted per window and concatenated into a **21-dim SDR input**:
+
+| Feature group | Stats computed |
+|---------------|----------------|
+| Dwell times (ms) | mean, median, std, skew, kurtosis, min\_KS, min\_Wasserstein |
+| Flight times (ms) | same 7 statistics |
+| QWERTY distances (units) | same 7 statistics |
+
+> **Key design choice**: `window_size` mirrors the original `htm/` default of 15 keystrokes (search range 10–30). No warmup is used — AnomalyLikelihood smooths the first-window spike, and human files are long enough that no windows need to be discarded. Bot files shorter than `window_size` are handled by the short-file rule (auto-misclassified), the same behaviour as `htm/`.
+
+The reference pool for KS/Wasserstein comparisons is built from training human files, stored in the model pkl, and used at inference time for `all_other_files` mode.
+
+### Step 1 — Prepare data (run once; requires `split.pkl`)
+
+```bash
+python htm/htm_prepare_data.py                              # creates split.pkl if needed
+python htm_distance_stats/htm_distance_stats_prepare_data.py  # creates stats_cache.pkl
+```
+
+`stats_cache.pkl` stores `{filepath: [(key_idx, dwell_ms, flight_ms, dist_units), ...]}` — the same format as `dist_cache.pkl`. If `dist_cache.pkl` already exists it is used as a seed to avoid re-parsing.
+
+> Feature extraction (windowing + statistics) is **not** performed in prepare_data — it depends on `window_size` which is a per-config hyperparameter and is computed on-the-fly in each SLURM job.
+
+### Step 2 — Generate configs and SLURM script
+
+```bash
+python htm_distance_stats/htm_distance_stats_generate_configs.py --n-configs 128 --seed 0
+```
+
+Writes `ds_configs/config_NNNN.json` and `slurm/ds_submit_array.sh`.
+
+### Step 3 — Submit to Newton
+
+```bash
+sbatch slurm/ds_submit_array.sh
+```
+
+Monitor:
+
+```bash
+squeue -u $USER
+ls ds_results/ | wc -l   # jobs finished so far
+```
+
+### Step 4 — Collect results
+
+```bash
+python htm_distance_stats/htm_distance_stats_collect_results.py --top 20
+```
+
+Reads `ds_results/ds*.json` and writes `ds_results/leaderboard.txt` and `.csv`.
+
+### Step 5 — Test a saved model
+
+```bash
+python htm_distance_stats/htm_distance_stats_test_model.py \
+    --model ds_models/<slug>.pkl \
+    --mode all_non_train
+```
+
+Evaluation modes are the same as `htm_distance/`: `orig`, `all_non_train`, `all_other_files`.
+
+The `all_other_files` mode parses new `.txt` files on-the-fly using `parse_file_distance` and computes features using the reference pool stored inside the model pkl — no extra cache needed.
+
+### HTM-Distance-Stats search space (Round 1)
+
+| Group | Parameter | Values |
+|-------|-----------|--------|
+| SP | `numActiveColumns` | 20, 25, 30, 35, 40 |
+| SP | `potentialPct` | 0.65, 0.80 |
+| SP | `synPermActiveInc` | 0.02, 0.05, 0.10 |
+| SP | `synPermConnected` | 0.10, 0.20 |
+| SP | `synPermInactiveDec` | 0.003, 0.005, 0.010 |
+| TM | `cellsPerColumn` | 16, 32 |
+| TM | `activationThreshold` | 10, 13 |
+| TM | `minThreshold` | 8, 10 |
+| TM | `maxNewSynapseCount` | 15, 20, 25, 30 |
+| TM | `initialPermanence` | 0.21, 0.31, 0.40 |
+| TM | `connectedPermanence` | 0.30, 0.50 |
+| TM | `permanenceIncrement` | 0.05, 0.10 |
+| TM | `permanenceDecrement` | 0.05, 0.10 |
+| Enc | `enc_bits_per_feature` | 16, 24, 32 |
+| Enc | `enc_w` | 5, 7, 9 |
+| Win | `window_size` | **10, 15, 20, 25, 30** — same range as `htm/` |
+| Win | `window_step` | 1 |
+| Det | `warmup_steps` | **fixed 0** — no warmup; AL handles first-window spike |
+| Det | `al_period` | 5, 10, 15, 20 |
+
+### Clean before re-run (parser or encoder changed)
+
+```bash
+rm stats_cache.pkl
+rm -rf ds_models/ ds_results/ ds_plots/ ds_configs/
+```
 
 ---
 
