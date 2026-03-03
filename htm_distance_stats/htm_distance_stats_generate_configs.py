@@ -149,7 +149,7 @@ def write_slurm_script(n_configs: int, out_path: str):
 #SBATCH --array=0-{n_configs - 1}%200
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
-#SBATCH --time=02:00:00
+#SBATCH --time=08:00:00
 ##SBATCH --partition=<partition>
 ##SBATCH --account=<account>
 
