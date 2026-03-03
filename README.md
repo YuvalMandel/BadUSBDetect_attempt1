@@ -197,7 +197,11 @@ Instead, after training, the threshold is found by a **two-stage search**:
 2. **Coarse pass**: sweep 200 evenly-spaced candidate thresholds from 0 to 1.
 3. **Fine pass**: sweep 1000 points in a ±2-step window around the coarse best.
    This gives an effective precision of ~0.00001.
-4. Picking the threshold that maximises **validation F1** across both passes.
+4. Picking the threshold that maximises the selection criterion across both passes:
+   - `htm/` and `htm_distance/`: **validation F1** (binary, positive = bot)
+   - `htm_distance_stats/` (Round 2+): **validation balanced accuracy** = (TPR + TNR) / 2.
+     Balanced accuracy is used because the val set has many more human files than bot files;
+     optimising F1 in that setting degenerates to thresh = 0 (predict everything as bot).
 5. Applying that threshold to the **test set** to get the reported test F1.
 
 This is standard post-hoc threshold calibration. The threshold is saved in the
@@ -239,7 +243,7 @@ Three 7-dimensional feature vectors are extracted per window and concatenated in
 | Flight times (ms) | same 7 statistics |
 | QWERTY distances (units) | same 7 statistics |
 
-> **Key design choice**: `window_size` mirrors the original `htm/` default of 15 keystrokes (search range 10–30). No warmup is used — AnomalyLikelihood smooths the first-window spike, and human files are long enough that no windows need to be discarded. Bot files shorter than `window_size` are handled by the short-file rule (auto-misclassified), the same behaviour as `htm/`.
+> **Key design choices**: `window_size` ranges from 10–30 keystrokes (same as `htm/`). Bot files shorter than `window_size` produce zero windows and are handled by the short-file rule (auto-misclassified, same as `htm/`). From Round 2 onwards, `warmup_steps` (0–3 windows) and `window_step` (1–2) are explicit hyperparameters. Threshold selection uses **balanced accuracy** to avoid the degenerate thresh = 0 solution that F1 produces when the val set is heavily imbalanced.
 
 The reference pool for KS/Wasserstein comparisons is built from training human files, stored in the model pkl, and used at inference time for `all_other_files` mode.
 
@@ -295,13 +299,15 @@ Evaluation modes are the same as `htm_distance/`: `orig`, `all_non_train`, `all_
 
 The `all_other_files` mode parses new `.txt` files on-the-fly using `parse_file_distance` and computes features using the reference pool stored inside the model pkl — no extra cache needed.
 
-### HTM-Distance-Stats search space (Round 1)
+### HTM-Distance-Stats search space
+
+#### Round 1 (configs 0114–0127, 14 runs)
 
 | Group | Parameter | Values |
 |-------|-----------|--------|
-| SP | `numActiveColumns` | 20, 25, 30, 35, 40 |
+| SP | `numActiveColumns` | 20, 25, 30, 35, **40** |
 | SP | `potentialPct` | 0.65, 0.80 |
-| SP | `synPermActiveInc` | 0.02, 0.05, 0.10 |
+| SP | `synPermActiveInc` | 0.02, 0.05, **0.10** |
 | SP | `synPermConnected` | 0.10, 0.20 |
 | SP | `synPermInactiveDec` | 0.003, 0.005, 0.010 |
 | TM | `cellsPerColumn` | 16, 32 |
@@ -312,12 +318,30 @@ The `all_other_files` mode parses new `.txt` files on-the-fly using `parse_file_
 | TM | `connectedPermanence` | 0.30, 0.50 |
 | TM | `permanenceIncrement` | 0.05, 0.10 |
 | TM | `permanenceDecrement` | 0.05, 0.10 |
-| Enc | `enc_bits_per_feature` | 16, 24, 32 |
-| Enc | `enc_w` | 5, 7, 9 |
-| Win | `window_size` | **10, 15, 20, 25, 30** — same range as `htm/` |
+| Enc | `enc_bits_per_feature` | **16**, 24, 32 |
+| Enc | `enc_w` | 5, 7, **9** |
+| Win | `window_size` | 10, 15, 20, 25, 30 |
 | Win | `window_step` | 1 |
-| Det | `warmup_steps` | **fixed 0** — no warmup; AL handles first-window spike |
-| Det | `al_period` | 5, 10, 15, 20 |
+| Det | `warmup_steps` | **fixed 0** |
+| Det | `al_period` | 5, 10, 15, **20** |
+
+Best Round 1 result: `ds0121` — val BAcc N/A (metric not yet tracked), test F1 = 0.5217 (18/18 bots caught). Threshold selection used F1, which collapsed to thresh = 0 for most configs (degenerate: predict everything as bot due to val-set class imbalance).
+
+#### Round 2 (configs 0128+)
+
+Changes from Round 1 (struck-through values removed, underlined values added):
+
+| Group | Parameter | Values | Change |
+|-------|-----------|--------|--------|
+| SP | `numActiveColumns` | 20, 25, 30, 35 | removed 40 |
+| SP | `synPermActiveInc` | 0.02, 0.05 | removed 0.10 |
+| Enc | `enc_bits_per_feature` | 24, 32 | removed 16 (rank 12/14 in R1) |
+| Enc | `enc_w` | 5, 7 | removed 9 (marginal; top-3 all used w=5) |
+| Win | `window_step` | 1, **2** | added stride-2 for more independent windows |
+| Det | `warmup_steps` | **0, 1, 2, 3** | now a hyperparameter |
+| Det | `al_period` | 5, 10, 15 | removed 20 |
+
+Threshold selection: **balanced accuracy** = (TPR + TNR) / 2 — avoids the thresh = 0 collapse. Default config anchored to Round 1 best (ds0121: sp_act=25, enc=24w5, ws=20, al=15).
 
 ### Clean before re-run (parser or encoder changed)
 

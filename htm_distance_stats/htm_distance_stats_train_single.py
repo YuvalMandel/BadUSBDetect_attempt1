@@ -40,7 +40,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from sklearn.metrics import classification_report, confusion_matrix, f1_score
+from sklearn.metrics import (balanced_accuracy_score, classification_report,
+                             confusion_matrix, f1_score)
 from tqdm import tqdm
 
 try:
@@ -74,9 +75,10 @@ def _base_slug(cfg, idx):
         f"ds{idx:04d}"
         f"_sp{cfg['sp_numActiveColumns']}"
         f"_enc{cfg['enc_bits_per_feature']}w{cfg['enc_w']}"
-        f"_ws{cfg['window_size']}"
+        f"_ws{cfg['window_size']}s{cfg.get('window_step', 1)}"
         f"_tm{cfg['tm_cellsPerColumn']}"
         f"_act{cfg['tm_activationThreshold']}"
+        f"_wu{cfg.get('warmup_steps', 0)}"
         f"_al{cfg.get('al_period', 10)}"
     )
 
@@ -85,7 +87,7 @@ def _full_slug(base, val_f1, test_f1):
     return f"{base}_vf1{val_f1:.4f}_tf1{test_f1:.4f}"
 
 
-def _plot_title(cfg, idx, val_f1, test_f1):
+def _plot_title(cfg, idx, val_bacc, val_f1, test_f1):
     return (
         f"Dist-Stats-HTM {idx:04d}  "
         f"SP: act={cfg['sp_numActiveColumns']} pct={cfg['sp_potentialPct']} "
@@ -94,8 +96,8 @@ def _plot_title(cfg, idx, val_f1, test_f1):
         f"minThr={cfg['tm_minThreshold']} newSyn={cfg['tm_maxNewSynapseCount']}\n"
         f"Enc: bits={cfg['enc_bits_per_feature']} w={cfg['enc_w']}  "
         f"win={cfg['window_size']}×{cfg.get('window_step',1)}  "
-        f"al={cfg.get('al_period', 10)}  warmup=0  |  "
-        f"Val F1={val_f1:.4f}   Test F1={test_f1:.4f}"
+        f"al={cfg.get('al_period', 10)}  warmup={cfg.get('warmup_steps', 0)}  |  "
+        f"Val BAcc={val_bacc:.4f}  Val F1={val_f1:.4f}   Test F1={test_f1:.4f}"
     )
 
 
@@ -103,7 +105,7 @@ def _plot_title(cfg, idx, val_f1, test_f1):
 def plot_results(val_h_seqs, val_b_seqs,
                  val_h_scores, val_b_scores,
                  all_val_seqs, all_val_labels,
-                 best_thresh, val_f1,
+                 best_thresh, best_bacc,
                  fname_slug, title, warmup):
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     fig.suptitle(title, fontsize=7)
@@ -140,19 +142,19 @@ def plot_results(val_h_seqs, val_b_seqs,
 
     ax = axes[2]
     ths = np.linspace(0, 1, 500)
-    f1s = [
-        f1_score(all_val_labels,
-                 apply_detection(all_val_seqs, 'first_crossing', t, warmup,
-                                 labels=all_val_labels),
-                 zero_division=0)
+    baccs = [
+        balanced_accuracy_score(
+            all_val_labels,
+            apply_detection(all_val_seqs, 'first_crossing', t, warmup,
+                            labels=all_val_labels))
         for t in ths
     ]
-    ax.plot(ths, f1s, color='blue', linewidth=2, label='Val F1')
+    ax.plot(ths, baccs, color='blue', linewidth=2, label='Val Balanced Acc')
     ax.axvline(best_thresh, color='red', linestyle='--', linewidth=2,
-               label=f'Best={best_thresh:.3f} (F1={val_f1:.4f})')
-    ax.set_title('F1 Score vs Threshold')
+               label=f'Best={best_thresh:.3f} (BAcc={best_bacc:.4f})')
+    ax.set_title('Balanced Accuracy vs Threshold\n(maximized during training)')
     ax.set_xlabel('Threshold')
-    ax.set_ylabel('F1 score')
+    ax.set_ylabel('Balanced accuracy')
     ax.set_ylim(0, 1.05)
     ax.legend()
     ax.grid(True)
@@ -363,15 +365,17 @@ def main():
     all_val_seqs   = val_h_sq + val_b_sq
     all_val_labels = val_h_lb + val_b_lb
 
-    # Stage 1: coarse sweep (200 points)
-    best_f1, best_thresh = 0.0, 0.0
+    # Stage 1: coarse sweep (200 points) — maximize BALANCED ACCURACY.
+    # Balanced accuracy = (TPR + TNR) / 2 avoids the degenerate thresh=0
+    # solution that occurs when the val set has many more humans than bots.
+    best_bacc, best_thresh = 0.0, 0.0
     coarse_pts = np.linspace(0, 1, 200)
     for th in coarse_pts:
         preds = apply_detection(all_val_seqs, 'first_crossing', th, warmup,
                                 labels=all_val_labels)
-        f1 = f1_score(all_val_labels, preds, zero_division=0)
-        if f1 > best_f1:
-            best_f1, best_thresh = f1, th
+        bacc = balanced_accuracy_score(all_val_labels, preds)
+        if bacc > best_bacc:
+            best_bacc, best_thresh = bacc, th
 
     # Stage 2: fine sweep (1000 points) in ±2 coarse steps around best
     coarse_step = 1.0 / (len(coarse_pts) - 1)
@@ -380,9 +384,15 @@ def main():
     for th in np.linspace(fine_lo, fine_hi, 1000):
         preds = apply_detection(all_val_seqs, 'first_crossing', th, warmup,
                                 labels=all_val_labels)
-        f1 = f1_score(all_val_labels, preds, zero_division=0)
-        if f1 > best_f1:
-            best_f1, best_thresh = f1, th
+        bacc = balanced_accuracy_score(all_val_labels, preds)
+        if bacc > best_bacc:
+            best_bacc, best_thresh = bacc, th
+
+    # Report val F1 at the balanced-acc-optimal threshold for comparison
+    best_f1 = f1_score(all_val_labels,
+                       apply_detection(all_val_seqs, 'first_crossing',
+                                       best_thresh, warmup, labels=all_val_labels),
+                       zero_division=0)
 
     # ── Test ──────────────────────────────────────────────────────
     print("Testing...")
@@ -397,7 +407,8 @@ def main():
                                  warmup, labels=all_test_labels)
     test_f1    = f1_score(all_test_labels, test_preds, zero_division=0)
 
-    print(f"\n  Val  F1 = {best_f1:.4f}  (thresh={best_thresh:.4f})")
+    print(f"\n  Val  Balanced Acc = {best_bacc:.4f}  (thresh={best_thresh:.4f})")
+    print(f"  Val  F1 (at thresh) = {best_f1:.4f}")
     print(f"  Test F1 = {test_f1:.4f}")
     print(f"\n--- Test Classification Report ---")
     print(classification_report(all_test_labels, test_preds,
@@ -442,7 +453,7 @@ def main():
     # ── Save outputs ──────────────────────────────────────────────
     base_slug  = _base_slug(cfg, config_idx)
     fname_slug = _full_slug(base_slug, best_f1, test_f1)
-    title      = _plot_title(cfg, config_idx, best_f1, test_f1)
+    title      = _plot_title(cfg, config_idx, best_bacc, best_f1, test_f1)
 
     model_path = os.path.join(MODELS_DIR, f"{fname_slug}.pkl")
     with open(model_path, 'wb') as fh:
@@ -464,6 +475,7 @@ def main():
             "ref_dists":    ref_dists,
             "config":       cfg,
             "config_idx":   config_idx,
+            "val_bacc":     float(best_bacc),
             "val_f1":       float(best_f1),
             "test_f1":      float(test_f1),
         }, fh)
@@ -472,6 +484,7 @@ def main():
     result = {
         "config_idx":            config_idx,
         "config":                cfg,
+        "val_bacc":              float(best_bacc),
         "val_f1":                float(best_f1),
         "test_f1":               float(test_f1),
         "best_thresh":           float(best_thresh),
@@ -490,14 +503,14 @@ def main():
     plot_results(val_h_sq, val_b_sq,
                  val_h_sc, val_b_sc,
                  all_val_seqs, all_val_labels,
-                 best_thresh, best_f1,
+                 best_thresh, best_bacc,
                  fname_slug, title, warmup)
     plot_confusion(all_val_labels, val_preds,
                    all_test_labels, test_preds,
                    fname_slug, title)
 
     print(f"\n[Config {config_idx:04d}] DONE — "
-          f"Val F1={best_f1:.4f}  Test F1={test_f1:.4f}\n")
+          f"Val BAcc={best_bacc:.4f}  Val F1={best_f1:.4f}  Test F1={test_f1:.4f}\n")
 
 
 if __name__ == "__main__":

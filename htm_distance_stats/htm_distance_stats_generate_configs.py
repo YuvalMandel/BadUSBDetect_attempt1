@@ -31,20 +31,26 @@ import random
 from pathlib import Path
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Round-1 search space
+# Round-2 search space  (refined from Round-1 results, indices 0114–0127)
 #
-# Window size: 10–30 keystrokes (like htm/ which defaults to 15).
-# No warmup: AnomalyLikelihood smooths the first-window spike; human files
-# are long so no windows need to be discarded.
-# Bot files shorter than window_size produce zero windows → short-file rule
-# auto-misclassifies them (same as htm/ behaviour with window_size=15).
+# Changes from Round 1:
+#   - enc_bits_per_feature: removed 16 (worst performer, rank 12)
+#   - enc_w:                removed 9 (marginal gains); keep 5 (top-3 all had w=5)
+#   - sp_numActiveColumns:  removed 40 (not competitive)
+#   - sp_synPermActiveInc:  removed 0.10 (didn't help)
+#   - al_period:            removed 20 (no benefit over 15)
+#   - window_step:          added 2 (more independent windows per file)
+#   - warmup_steps:         added as explicit hyperparameter (0–3 windows)
+#
+# Threshold selection: now uses balanced accuracy = (TPR+TNR)/2, which avoids
+# collapsing to thresh=0 when val has many more humans than bots.
 # ──────────────────────────────────────────────────────────────────────────────
 PARAM_SPACE = {
     # SpatialPooler
     "sp_columnDimensions":    [2048],
-    "sp_numActiveColumns":    [20, 25, 30, 35, 40],
+    "sp_numActiveColumns":    [20, 25, 30, 35],          # dropped 40
     "sp_potentialPct":        [0.65, 0.80],
-    "sp_synPermActiveInc":    [0.02, 0.05, 0.10],
+    "sp_synPermActiveInc":    [0.02, 0.05],              # dropped 0.10
     "sp_synPermConnected":    [0.10, 0.20],
     "sp_synPermInactiveDec":  [0.003, 0.005, 0.010],
     # TemporalMemory
@@ -56,37 +62,39 @@ PARAM_SPACE = {
     "tm_maxNewSynapseCount":  [15, 20, 25, 30],
     "tm_permanenceIncrement": [0.05, 0.10],
     "tm_permanenceDecrement": [0.05, 0.10],
-    # Encoder (for 21-dim StatsEncoder)
-    "enc_bits_per_feature":   [16, 24, 32],
-    "enc_w":                  [5, 7, 9],
-    # Window — same range as htm/ (default 15, max 30)
+    # Encoder — dropped 16-bit (noisy, rank 12) and w=9 (marginal)
+    "enc_bits_per_feature":   [24, 32],
+    "enc_w":                  [5, 7],
+    # Window
     "window_size":            [10, 15, 20, 25, 30],
-    "window_step":            [1],   # sliding stride (fixed for Round 1)
-    # AnomalyLikelihood history window (warmup is fixed at 0)
-    "al_period":              [5, 10, 15, 20],
+    "window_step":            [1, 2],                    # stride 2 for independence
+    # AnomalyLikelihood history window
+    "al_period":              [5, 10, 15],               # dropped 20
+    # Warmup (in windows): skip the first N windows during scoring
+    "warmup_steps":           [0, 1, 2, 3],
 }
 
-# Default config: mirrors htm/ best config (cfg0083) with 21-dim encoder
+# Default config: best Round-1 config (ds0121) as the anchor point
 DEFAULT_CONFIG = {
     "sp_columnDimensions":    2048,
-    "sp_numActiveColumns":    40,
+    "sp_numActiveColumns":    25,
     "sp_potentialPct":        0.80,
-    "sp_synPermActiveInc":    0.05,
+    "sp_synPermActiveInc":    0.02,
     "sp_synPermConnected":    0.10,
     "sp_synPermInactiveDec":  0.005,
     "tm_cellsPerColumn":      16,
-    "tm_activationThreshold": 13,
+    "tm_activationThreshold": 10,
     "tm_initialPermanence":   0.21,
     "tm_connectedPermanence": 0.50,
     "tm_minThreshold":        8,
     "tm_maxNewSynapseCount":  20,
-    "tm_permanenceIncrement": 0.10,
-    "tm_permanenceDecrement": 0.10,
-    "enc_bits_per_feature":   16,
+    "tm_permanenceIncrement": 0.05,
+    "tm_permanenceDecrement": 0.05,
+    "enc_bits_per_feature":   24,
     "enc_w":                  5,
-    "window_size":            15,   # same default as htm/
+    "window_size":            20,
     "window_step":            1,
-    # warmup_steps absent → defaults to 0 (WARMUP_STEPS constant)
+    "warmup_steps":           0,
     "al_period":              15,
     "seed":                   42,
 }

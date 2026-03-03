@@ -55,9 +55,12 @@ def format_row(rank: int, r: dict) -> str:
         f"wu={cfg.get('warmup_steps','?')} "
         f"al={cfg.get('al_period','?')}"
     )
+    val_bacc = r.get("val_bacc", float("nan"))
+    bacc_str = f"{val_bacc:.4f}" if val_bacc == val_bacc else "  N/A "
     return (
         f"{rank:>4}  "
         f"ds{r.get('config_idx', 0):04d}  "
+        f"{bacc_str}  "
         f"{r.get('val_f1', 0):.4f}   "
         f"{r.get('test_f1', 0):.4f}   "
         f"{r.get('best_thresh', 0):.4f}  "
@@ -81,20 +84,20 @@ def main():
               "Run htm_distance_stats_train_single.py jobs first.")
         sys.exit(0)
 
-    records.sort(key=lambda r: (r.get("test_f1", 0), r.get("val_f1", 0)),
+    records.sort(key=lambda r: (r.get("test_f1", 0), r.get("val_bacc", r.get("val_f1", 0))),
                  reverse=True)
 
     total = len(records)
     show  = min(args.top, total)
 
-    sep    = "=" * 140
-    header = (f"{'Rank':>4}  {'Config':>8}  {'Val F1':>7}   "
+    sep    = "=" * 152
+    header = (f"{'Rank':>4}  {'Config':>8}  {'ValBAcc':>7}  {'Val F1':>7}   "
               f"{'Test F1':>7}   {'Thresh':>7}  "
               f"{'DetStep':>9}  {'Caught':>10}  "
               f"{'bSc':>7}  {'hSc':>7}  Key params")
     lines  = [sep,
               f"  HTM-Distance-Stats Hyperparameter Search — {total} completed runs",
-              sep, header, "-" * 140]
+              sep, header, "-" * 152]
 
     for rank, r in enumerate(records[:show], 1):
         lines.append(format_row(rank, r))
@@ -104,6 +107,7 @@ def main():
         sep,
         f"  Best config : ds_configs/config_{best.get('config_idx', 0):04d}.json",
         f"  Best model  : {best.get('model_file', '(see ds_models/)')}",
+        f"  Best val BAcc: {best.get('val_bacc', float('nan')):.4f}",
         f"  Best val F1 : {best.get('val_f1', 0):.4f}",
         f"  Best test F1: {best.get('test_f1', 0):.4f}",
         f"  Mean det window: {best.get('mean_bot_detect_step', -1):.1f}  "
@@ -132,7 +136,7 @@ def main():
 
     csv_path = os.path.join(RESULTS_DIR, "leaderboard.csv")
     fieldnames = (
-        ["rank", "config_idx", "val_f1", "test_f1", "best_thresh",
+        ["rank", "config_idx", "val_bacc", "val_f1", "test_f1", "best_thresh",
          "mean_bot_detect_step", "n_bots_caught", "n_bots_total",
          "mean_bot_score", "mean_human_score"]
         + all_cfg_keys
@@ -146,6 +150,7 @@ def main():
             row = {
                 "rank":                 rank,
                 "config_idx":           r.get("config_idx", ""),
+                "val_bacc":             r.get("val_bacc", ""),
                 "val_f1":               r.get("val_f1", ""),
                 "test_f1":              r.get("test_f1", ""),
                 "best_thresh":          r.get("best_thresh", ""),
