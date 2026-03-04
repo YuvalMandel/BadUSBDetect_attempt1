@@ -2,19 +2,30 @@
 htm_combined/htm_combined_generate_configs.py
 Generate random HTM-Combined hyperparameter configs and a SLURM script.
 
-Search space refined from round-1 results (122 runs):
-  Best config hc0021: sp=30, enc=16w9, ws=5s1, tm=16, act=13, wu=2, al=15
-  Top-5 all use enc_bits=16, enc_w=7 or 9, ws=5-20, warmup=2-3.
+Search space refined from round-2 results (122 runs, best test F1 = 0.9189):
+  Best: hc0036 — sp=30 pct=0.8, se=32w5, ke=8w5, ws=5s1, tm=16, act=10, wu=2, al=15
 
-New in this round: stats block and per-keystroke scalar block have
-  INDEPENDENT encoder settings (stats_enc_bits/stats_enc_w vs
-  scalar_enc_bits/scalar_enc_w), allowing the search to decouple
-  resolution on the 21-dim stats features from dwell/flight/dist scalars.
+New in Round 3: ALL 24 scalar-encoded parameters have independent enc_bits/enc_w:
+  - 3 stats channels × (enc_bits, enc_w):
+      dwell_stats_enc_bits / dwell_stats_enc_w    (7 dwell-time statistics)
+      flight_stats_enc_bits / flight_stats_enc_w  (7 flight-time statistics)
+      dist_stats_enc_bits   / dist_stats_enc_w    (7 QWERTY-distance statistics)
+  - 3 per-keystroke scalars × (enc_bits, enc_w):
+      dwell_scalar_enc_bits / dwell_scalar_enc_w  (last-key dwell time, 0-400 ms)
+      flight_scalar_enc_bits/ flight_scalar_enc_w (last-key flight time, 0-500 ms)
+      dist_scalar_enc_bits  / dist_scalar_enc_w   (last-key QWERTY dist, 0-12 u)
 
-Cumulative workflow -- results are never deleted:
-  Each run finds the highest config_idx already present in hc_results/,
-  removes old hc_configs/*.json files, then writes new configs numbered
-  from last_idx + 1 onward.
+Round-2 analysis (top-20 configs):
+  scalar_enc_bits: 8 → 75%, 24 → 20%, 16 → 5%  →  narrow to [8, 16]
+  scalar_enc_w:    7 → 65%, 5 → 20%, 3 → 15%
+  stats_enc_bits:  evenly spread across 16/24/32
+  stats_enc_w:     7 → 50%, 5 → 25%, 9 → 25%
+  window_step=1 preferred (65%); al_period=10 most common
+  tm_maxNewSynapseCount=30 dominant; tm_minThreshold=8 preferred
+
+Cumulative workflow — results are never deleted:
+  Each run finds the highest config_idx in hc_results/, deletes old
+  hc_configs/*.json, then writes new configs numbered from last_idx+1.
 
 Usage (from project root):
   python htm_combined/htm_combined_generate_configs.py [--n-configs 128] [--seed 0]
@@ -32,71 +43,78 @@ import random
 from pathlib import Path
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Search space
-#
-# enc_bits_per_feature / enc_w : shared for both the 21-dim stats block and the
-#   3 last-keystroke scalar encoders.  The key one-hot is always 95 bits (fixed).
-#
-# window_size: kept small because bot files have few printable keystrokes;
-#   window_size=10 was the clear winner in htm_distance_stats/.
-#
-# warmup_steps: in WINDOWS (not keystrokes).  0-3 windows; AnomalyLikelihood
-#   suppresses the early high-anomaly spike so warmup=0 is now safe.
+# Search space (Round 3)
 # ──────────────────────────────────────────────────────────────────────────────
 PARAM_SPACE = {
-    # SpatialPooler — narrowed around top-5 winners
-    "sp_columnDimensions":    [2048],
-    "sp_numActiveColumns":    [25, 30, 35],          # dropped 20, 40
-    "sp_potentialPct":        [0.65, 0.80],
-    "sp_synPermActiveInc":    [0.02, 0.05],
-    "sp_synPermConnected":    [0.10, 0.20],
-    "sp_synPermInactiveDec":  [0.003, 0.005, 0.010],
+    # SpatialPooler
+    "sp_columnDimensions":     [2048],
+    "sp_numActiveColumns":     [25, 30, 35],
+    "sp_potentialPct":         [0.65, 0.80],
+    "sp_synPermActiveInc":     [0.02, 0.05],
+    "sp_synPermConnected":     [0.10, 0.20],
+    "sp_synPermInactiveDec":   [0.003, 0.005, 0.010],
     # TemporalMemory
-    "tm_cellsPerColumn":      [16, 32],
-    "tm_activationThreshold": [10, 13],
-    "tm_initialPermanence":   [0.21, 0.31, 0.40],
-    "tm_connectedPermanence": [0.30, 0.50],
-    "tm_minThreshold":        [8, 10],
-    "tm_maxNewSynapseCount":  [15, 20, 25, 30],
-    "tm_permanenceIncrement": [0.05, 0.10],
-    "tm_permanenceDecrement": [0.05, 0.10],
-    # Stats-block encoder (21 features, data-derived ranges)
-    # enc_bits=16 dominated round-1 top-5; keep 24 for coverage
-    "stats_enc_bits":         [16, 24, 32],
-    "stats_enc_w":            [5, 7, 9],
-    # Per-keystroke scalar encoder (dwell, flight, dist — fixed physical ranges)
-    # Can be smaller/different from stats block
-    "scalar_enc_bits":        [8, 16, 24],
-    "scalar_enc_w":           [3, 5, 7],
+    "tm_cellsPerColumn":       [16, 32],
+    "tm_activationThreshold":  [10, 13],
+    "tm_initialPermanence":    [0.21, 0.31, 0.40],
+    "tm_connectedPermanence":  [0.30, 0.50],
+    "tm_minThreshold":         [8, 10],
+    "tm_maxNewSynapseCount":   [20, 25, 30],
+    "tm_permanenceIncrement":  [0.05, 0.10],
+    "tm_permanenceDecrement":  [0.05, 0.10],
+    # Stats-channel encoders — per physical quantity (7 features each)
+    # All 3 channels have independent resolution settings
+    "dwell_stats_enc_bits":    [16, 24, 32],
+    "dwell_stats_enc_w":       [5, 7, 9],
+    "flight_stats_enc_bits":   [16, 24, 32],
+    "flight_stats_enc_w":      [5, 7, 9],
+    "dist_stats_enc_bits":     [16, 24, 32],
+    "dist_stats_enc_w":        [5, 7, 9],
+    # Per-keystroke scalar encoders — per physical quantity (1 feature each)
+    # scalar_enc_bits=8 dominated Round 2 (75%); 16 kept for coverage; 24 dropped
+    "dwell_scalar_enc_bits":   [8, 16],
+    "dwell_scalar_enc_w":      [3, 5, 7],
+    "flight_scalar_enc_bits":  [8, 16],
+    "flight_scalar_enc_w":     [3, 5, 7],
+    "dist_scalar_enc_bits":    [8, 16],
+    "dist_scalar_enc_w":       [3, 5, 7],
     # Window
-    "window_size":            [5, 10, 15, 20],
-    "window_step":            [1, 2],
-    # Detection — warmup 0/1 correlated with degenerate configs; focus on 2-3
-    "warmup_steps":           [2, 3],
-    "al_period":              [5, 10, 15],
+    "window_size":             [5, 10, 15, 20],
+    "window_step":             [1, 2],
+    # Detection — warmup=0/1 produced degenerate configs; focus on 2-3
+    "warmup_steps":            [2, 3],
+    "al_period":               [5, 10, 15],
 }
 
-# Default: anchored on round-1 winner hc0021
-# (sp=30, enc=16w9, ws=5s1, tm=16, act=13, wu=2, al=15)
+# Default: anchored on Round-2 winner hc0036
+# (sp=30 pct=0.8, se=32w5, ke=8w5, ws=5s1, tm=16, act=10, wu=2, al=15)
 DEFAULT_CONFIG = {
     "sp_columnDimensions":    2048,
     "sp_numActiveColumns":    30,
     "sp_potentialPct":        0.80,
-    "sp_synPermActiveInc":    0.02,
-    "sp_synPermConnected":    0.10,
-    "sp_synPermInactiveDec":  0.005,
+    "sp_synPermActiveInc":    0.05,
+    "sp_synPermConnected":    0.20,
+    "sp_synPermInactiveDec":  0.010,
     "tm_cellsPerColumn":      16,
-    "tm_activationThreshold": 13,
-    "tm_initialPermanence":   0.21,
-    "tm_connectedPermanence": 0.50,
-    "tm_minThreshold":        10,
-    "tm_maxNewSynapseCount":  20,
+    "tm_activationThreshold": 10,
+    "tm_initialPermanence":   0.31,
+    "tm_connectedPermanence": 0.30,
+    "tm_minThreshold":        8,
+    "tm_maxNewSynapseCount":  30,
     "tm_permanenceIncrement": 0.05,
     "tm_permanenceDecrement": 0.05,
-    "stats_enc_bits":         16,
-    "stats_enc_w":            9,
-    "scalar_enc_bits":        16,
-    "scalar_enc_w":           7,
+    "dwell_stats_enc_bits":   32,
+    "dwell_stats_enc_w":      5,
+    "flight_stats_enc_bits":  32,
+    "flight_stats_enc_w":     5,
+    "dist_stats_enc_bits":    32,
+    "dist_stats_enc_w":       5,
+    "dwell_scalar_enc_bits":  8,
+    "dwell_scalar_enc_w":     5,
+    "flight_scalar_enc_bits": 8,
+    "flight_scalar_enc_w":    5,
+    "dist_scalar_enc_bits":   8,
+    "dist_scalar_enc_w":      5,
     "window_size":            5,
     "window_step":            1,
     "warmup_steps":           2,
@@ -108,11 +126,20 @@ DEFAULT_CONFIG = {
 # ──────────────────────────────────────────────────────────────────────────────
 # Validity constraints
 # ──────────────────────────────────────────────────────────────────────────────
+_ENC_PAIRS = [
+    ("dwell_stats_enc_w",    "dwell_stats_enc_bits"),
+    ("flight_stats_enc_w",   "flight_stats_enc_bits"),
+    ("dist_stats_enc_w",     "dist_stats_enc_bits"),
+    ("dwell_scalar_enc_w",   "dwell_scalar_enc_bits"),
+    ("flight_scalar_enc_w",  "flight_scalar_enc_bits"),
+    ("dist_scalar_enc_w",    "dist_scalar_enc_bits"),
+]
+
+
 def is_valid(cfg: dict) -> bool:
-    if cfg["stats_enc_w"] >= cfg["stats_enc_bits"]:
-        return False
-    if cfg["scalar_enc_w"] >= cfg["scalar_enc_bits"]:
-        return False
+    for w_key, bits_key in _ENC_PAIRS:
+        if cfg[w_key] >= cfg[bits_key]:
+            return False
     if cfg["tm_minThreshold"] > cfg["tm_activationThreshold"]:
         return False
     if cfg["tm_activationThreshold"] > cfg["tm_maxNewSynapseCount"]:
@@ -213,23 +240,20 @@ def main():
     os.makedirs("hc_configs", exist_ok=True)
     os.makedirs("logs",       exist_ok=True)
 
-    # ---- Find where to continue from ----
     start_idx = find_start_idx("hc_results")
     print(f"Completed hc runs: {start_idx}  (next config index: {start_idx})")
 
-    # ---- Delete old (already-run) config files ----
     old_configs = glob.glob("hc_configs/config_*.json")
     if old_configs:
         for f in old_configs:
             os.remove(f)
         print(f"Deleted {len(old_configs)} old config file(s) from hc_configs/")
 
-    # ---- Sample new configs ----
     rng = random.Random(args.seed + start_idx)
     configs = []
     seen: set = set()
 
-    # Always include DEFAULT_CONFIG first (no seed in dedup key)
+    # Always include DEFAULT_CONFIG first
     default = DEFAULT_CONFIG.copy()
     configs.append(default)
     seen.add(json.dumps(
@@ -249,7 +273,6 @@ def main():
             seen.add(key)
             configs.append(cfg)
 
-    # ---- Write config files ----
     for i, cfg in enumerate(configs):
         global_idx = start_idx + i
         path = f"hc_configs/config_{global_idx:04d}.json"
@@ -262,12 +285,10 @@ def main():
     write_slurm_script(n, "slurm/hc_submit_array.sh")
 
     print(f"\nWorkflow:")
-    print(f"  1. python htm_distance_stats/htm_distance_stats_prepare_data.py  "
-          f"# builds stats_cache.pkl (reused here)")
-    print(f"  2. python htm_combined/htm_combined_generate_configs.py "
+    print(f"  1. python htm_combined/htm_combined_generate_configs.py "
           f"--n-configs {args.n_configs}")
-    print(f"  3. sbatch slurm/hc_submit_array.sh        # submit {n} jobs")
-    print(f"  4. python htm_combined/htm_combined_collect_results.py")
+    print(f"  2. sbatch slurm/hc_submit_array.sh        # submit {n} jobs")
+    print(f"  3. python htm_combined/htm_combined_collect_results.py")
 
 
 if __name__ == "__main__":

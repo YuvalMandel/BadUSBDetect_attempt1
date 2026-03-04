@@ -4,26 +4,27 @@ Shared utilities for the HTM-Combined variant.
 
 Design: each HTM timestep encodes ONE sliding window of printable keystrokes.
 
-  Block 1 -- Stats (21 dims, data-derived ranges):
-    7 statistics x 3 channels (dwell times, flight times, QWERTY distances)
-    over ALL keystrokes in the window, identical to htm_distance_stats/.
+  Block 1 -- Stats (21 dims, data-derived ranges), split into 3 channels:
+    Dwell stats   (7 features): per-channel settings (dwell_stats_enc_bits / dwell_stats_enc_w)
+    Flight stats  (7 features): per-channel settings (flight_stats_enc_bits / flight_stats_enc_w)
+    Dist stats    (7 features): per-channel settings (dist_stats_enc_bits  / dist_stats_enc_w)
 
-  Block 2 -- Last-keystroke identity (95 + 3 x scalar_enc_bits bits, fixed ranges):
-    key_type  : one-hot over 95 printable ASCII keys (exactly 1 active bit)
-    dwell_ms  : 0-400 ms   (scalar block, scalar_enc_bits bits, scalar_enc_w active)
-    flight_ms : 0-500 ms
-    dist_units: 0-12  QWERTY key-units
+  Block 2 -- Last-keystroke identity (95 + 3 scalar encoders, fixed physical ranges):
+    key_type   : one-hot over 95 printable ASCII keys (exactly 1 active bit)
+    dwell_ms   : 0-400 ms   (dwell_scalar_enc_bits  bits, dwell_scalar_enc_w  active)
+    flight_ms  : 0-500 ms   (flight_scalar_enc_bits bits, flight_scalar_enc_w active)
+    dist_units : 0-12 units (dist_scalar_enc_bits   bits, dist_scalar_enc_w   active)
 
-Full SDR layout (left -> right):
-  [ stats_block | key_one_hot | dwell | flight | dist ]
-   21*stats_enc_bits  95 bits  scalar_enc_bits x3
+Full SDR layout:
+  [ dwell_stats | flight_stats | dist_stats | key_one_hot | dwell_key | flight_key | dist_key ]
+    7×d_sb        7×f_sb        7×q_sb       95 bits       d_kb        f_kb         q_kb
 
-Total bits   = 21*stats_enc_bits + 95 + 3*scalar_enc_bits
-Active bits  = 21*stats_enc_w    +  1 + 3*scalar_enc_w
+Total bits  = 7*(d_sb + f_sb + q_sb) + 95 + d_kb + f_kb + q_kb
+Active bits = 7*(d_sw + f_sw + q_sw) +  1 + d_kw + f_kw + q_kw
 
-The stats block uses data-derived min/max (fitted on training windows).
-The last-keystroke scalars use fixed physical ranges (same as htm_distance/).
-Stats and scalar blocks can have independent enc_bits / enc_w settings.
+The 3 stats channels encode fundamentally different physical quantities
+(dwell time ms, flight time ms, QWERTY distance units), so independent
+encoder resolution is expected to improve model quality.
 """
 
 import os
@@ -51,9 +52,14 @@ from htm_distance_common import (           # noqa: F401
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants
 # ──────────────────────────────────────────────────────────────────────────────
-NUM_STATS    = 21   # 7 stats x 3 channels (dwell, flight, dist)
-NUM_KEYS     = 95   # printable ASCII 32-126 -> indices 0-94
+NUM_STATS    = 21   # 7 stats × 3 channels (dwell, flight, dist)
+NUM_KEYS     = 95   # printable ASCII 32-126 → indices 0-94
 WARMUP_STEPS = 0    # windows to skip (AnomalyLikelihood handles the early spike)
+
+# Stats channel slice indices
+_DWELL_SLICE  = slice(0,  7)
+_FLIGHT_SLICE = slice(7,  14)
+_DIST_SLICE   = slice(14, 21)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -64,78 +70,120 @@ class CombinedEncoder:
     Encodes (21-dim stats vector, key_idx, dwell_ms, flight_ms, dist_units)
     into a sparse binary SDR.
 
-    Layout:
-      [ stats_block | key_one_hot | dwell | flight | dist ]
-       21*stats_enc_bits  95 bits  scalar_enc_bits x3
+    All 24 scalar parameters have independent enc_bits / enc_w settings:
+      - 7 dwell stats features  : dwell_stats_enc_bits  / dwell_stats_enc_w
+      - 7 flight stats features : flight_stats_enc_bits / flight_stats_enc_w
+      - 7 dist stats features   : dist_stats_enc_bits   / dist_stats_enc_w
+      - 1 last-keystroke dwell  : dwell_scalar_enc_bits / dwell_scalar_enc_w
+      - 1 last-keystroke flight : flight_scalar_enc_bits/ flight_scalar_enc_w
+      - 1 last-keystroke dist   : dist_scalar_enc_bits  / dist_scalar_enc_w
+      (+ key one-hot: 95 bits, always 1 active — not a scalar encoder)
 
-    Total bits   = 21*stats_enc_bits + 95 + 3*scalar_enc_bits
-    Active bits  = 21*stats_enc_w    +  1 + 3*scalar_enc_w
+    SDR layout:
+      [ dwell_stats | flight_stats | dist_stats | key_one_hot | dwell_key | flight_key | dist_key ]
 
     min_vals / max_vals (length-21 arrays) define data-derived encoding ranges
     for the stats block.  Last-keystroke scalars use fixed physical ranges.
-    Stats and scalar blocks have independent enc_bits / enc_w settings.
     """
 
     NUM_STATS = NUM_STATS
     KEY_BITS  = NUM_KEYS
 
     def __init__(self, min_vals, max_vals,
-                 stats_enc_bits: int = 16, stats_enc_w: int = 9,
-                 scalar_enc_bits: int = 16, scalar_enc_w: int = 7):
-        assert len(min_vals) == self.NUM_STATS, \
-            f"Expected {self.NUM_STATS} min_vals, got {len(min_vals)}"
-        assert len(max_vals) == self.NUM_STATS, \
-            f"Expected {self.NUM_STATS} max_vals, got {len(max_vals)}"
-        assert stats_enc_w < stats_enc_bits, \
-            f"stats_enc_w ({stats_enc_w}) must be < stats_enc_bits ({stats_enc_bits})"
-        assert scalar_enc_w < scalar_enc_bits, \
-            f"scalar_enc_w ({scalar_enc_w}) must be < scalar_enc_bits ({scalar_enc_bits})"
+                 dwell_stats_enc_bits:  int = 24, dwell_stats_enc_w:  int = 7,
+                 flight_stats_enc_bits: int = 24, flight_stats_enc_w: int = 7,
+                 dist_stats_enc_bits:   int = 24, dist_stats_enc_w:   int = 7,
+                 dwell_scalar_enc_bits: int = 8,  dwell_scalar_enc_w: int = 5,
+                 flight_scalar_enc_bits:int = 8,  flight_scalar_enc_w:int = 5,
+                 dist_scalar_enc_bits:  int = 8,  dist_scalar_enc_w:  int = 5):
+        assert len(min_vals) == self.NUM_STATS
+        assert len(max_vals) == self.NUM_STATS
+        for bits, w, name in [
+            (dwell_stats_enc_bits,   dwell_stats_enc_w,   "dwell_stats"),
+            (flight_stats_enc_bits,  flight_stats_enc_w,  "flight_stats"),
+            (dist_stats_enc_bits,    dist_stats_enc_w,    "dist_stats"),
+            (dwell_scalar_enc_bits,  dwell_scalar_enc_w,  "dwell_scalar"),
+            (flight_scalar_enc_bits, flight_scalar_enc_w, "flight_scalar"),
+            (dist_scalar_enc_bits,   dist_scalar_enc_w,   "dist_scalar"),
+        ]:
+            assert w < bits, f"{name}: enc_w ({w}) must be < enc_bits ({bits})"
 
-        self.min_vals        = np.array(min_vals, dtype=float)
-        self.max_vals        = np.array(max_vals, dtype=float)
-        self.stats_enc_bits  = stats_enc_bits
-        self.stats_enc_w     = stats_enc_w
-        self.scalar_enc_bits = scalar_enc_bits
-        self.scalar_enc_w    = scalar_enc_w
-        self.total_bits      = (self.NUM_STATS * stats_enc_bits
-                                + self.KEY_BITS
-                                + 3 * scalar_enc_bits)
-        self._ranges         = np.maximum(self.max_vals - self.min_vals, 1e-9)
+        self.min_vals  = np.array(min_vals, dtype=float)
+        self.max_vals  = np.array(max_vals, dtype=float)
+        self._ranges   = np.maximum(self.max_vals - self.min_vals, 1e-9)
 
-        # Scalar encoders for the last-keystroke features (fixed physical ranges)
+        self.dwell_stats_enc_bits   = dwell_stats_enc_bits
+        self.dwell_stats_enc_w      = dwell_stats_enc_w
+        self.flight_stats_enc_bits  = flight_stats_enc_bits
+        self.flight_stats_enc_w     = flight_stats_enc_w
+        self.dist_stats_enc_bits    = dist_stats_enc_bits
+        self.dist_stats_enc_w       = dist_stats_enc_w
+        self.dwell_scalar_enc_bits  = dwell_scalar_enc_bits
+        self.dwell_scalar_enc_w     = dwell_scalar_enc_w
+        self.flight_scalar_enc_bits = flight_scalar_enc_bits
+        self.flight_scalar_enc_w    = flight_scalar_enc_w
+        self.dist_scalar_enc_bits   = dist_scalar_enc_bits
+        self.dist_scalar_enc_w      = dist_scalar_enc_w
+
+        self.total_bits = (
+            7 * (dwell_stats_enc_bits + flight_stats_enc_bits + dist_stats_enc_bits)
+            + self.KEY_BITS
+            + dwell_scalar_enc_bits + flight_scalar_enc_bits + dist_scalar_enc_bits
+        )
+
+        # Scalar encoders for last-keystroke features (fixed physical ranges)
         self._dwell_enc  = SimpleScalarEncoder(DWELL_MIN,  DWELL_MAX,
-                                               scalar_enc_bits, scalar_enc_w)
+                                               dwell_scalar_enc_bits,  dwell_scalar_enc_w)
         self._flight_enc = SimpleScalarEncoder(FLIGHT_MIN, FLIGHT_MAX,
-                                               scalar_enc_bits, scalar_enc_w)
+                                               flight_scalar_enc_bits, flight_scalar_enc_w)
         self._dist_enc   = SimpleScalarEncoder(DIST_MIN,   DIST_MAX,
-                                               scalar_enc_bits, scalar_enc_w)
+                                               dist_scalar_enc_bits,   dist_scalar_enc_w)
 
     def encode(self, stats_features, key_idx: int,
                dwell: float, flight: float, distance: float) -> np.ndarray:
         """Encode a combined feature set into a dense binary uint8 SDR."""
-        dense            = np.zeros(self.total_bits, dtype=np.uint8)
-        stats_enc_bits   = self.stats_enc_bits
-        stats_enc_w      = self.stats_enc_w
-        scalar_enc_bits  = self.scalar_enc_bits
+        dense  = np.zeros(self.total_bits, dtype=np.uint8)
+        offset = 0
 
-        # ── Block 1: stats (21 features, data-derived ranges) ────────────────
-        for i in range(self.NUM_STATS):
+        # ── Block 1a: dwell stats (features 0-6, data-derived ranges) ────────
+        bits, w = self.dwell_stats_enc_bits, self.dwell_stats_enc_w
+        for i in range(0, 7):
             val = float(np.clip(stats_features[i], self.min_vals[i], self.max_vals[i]))
             pos = (val - self.min_vals[i]) / self._ranges[i]
-            idx = int(pos * (stats_enc_bits - stats_enc_w))
-            idx = max(0, min(stats_enc_bits - stats_enc_w, idx))
-            offset = i * stats_enc_bits
-            for j in range(stats_enc_w):
+            idx = max(0, min(bits - w, int(pos * (bits - w))))
+            for j in range(w):
                 dense[offset + idx + j] = 1
+            offset += bits
+
+        # ── Block 1b: flight stats (features 7-13) ────────────────────────────
+        bits, w = self.flight_stats_enc_bits, self.flight_stats_enc_w
+        for i in range(7, 14):
+            val = float(np.clip(stats_features[i], self.min_vals[i], self.max_vals[i]))
+            pos = (val - self.min_vals[i]) / self._ranges[i]
+            idx = max(0, min(bits - w, int(pos * (bits - w))))
+            for j in range(w):
+                dense[offset + idx + j] = 1
+            offset += bits
+
+        # ── Block 1c: dist stats (features 14-20) ────────────────────────────
+        bits, w = self.dist_stats_enc_bits, self.dist_stats_enc_w
+        for i in range(14, 21):
+            val = float(np.clip(stats_features[i], self.min_vals[i], self.max_vals[i]))
+            pos = (val - self.min_vals[i]) / self._ranges[i]
+            idx = max(0, min(bits - w, int(pos * (bits - w))))
+            for j in range(w):
+                dense[offset + idx + j] = 1
+            offset += bits
 
         # ── Block 2: key one-hot (95 bits, exactly 1 active) ─────────────────
-        key_offset = self.NUM_STATS * stats_enc_bits
-        dense[key_offset + max(0, min(self.KEY_BITS - 1, key_idx))] = 1
+        dense[offset + max(0, min(self.KEY_BITS - 1, key_idx))] = 1
+        offset += self.KEY_BITS
 
-        # ── Block 3: last-keystroke scalars ───────────────────────────────────
-        offset = key_offset + self.KEY_BITS
-        self._dwell_enc.encode_into(dwell, dense, offset);    offset += scalar_enc_bits
-        self._flight_enc.encode_into(flight, dense, offset);  offset += scalar_enc_bits
+        # ── Block 3: per-keystroke scalars (independent per-feature settings) ─
+        self._dwell_enc.encode_into(dwell, dense, offset)
+        offset += self.dwell_scalar_enc_bits
+        self._flight_enc.encode_into(flight, dense, offset)
+        offset += self.flight_scalar_enc_bits
         self._dist_enc.encode_into(distance, dense, offset)
 
         return dense
@@ -151,19 +199,6 @@ def create_reference_pool(train_human_files, cache,
     """
     Build KS/Wasserstein reference windows for dwell, flight, and distance
     from training human files.
-
-    Parameters
-    ----------
-    train_human_files : list[str]
-    cache             : dict[str, list[tuple]]
-        filepath -> [(key_idx, dwell_ms, flight_ms, dist_units), ...]
-    window_size       : int -- must match the config window_size
-    num_references    : int -- number of reference windows per channel
-    seed              : int
-
-    Returns
-    -------
-    (ref_dwells, ref_flights, ref_dists) : lists of numpy arrays
     """
     rng = random.Random(seed)
     all_dwells, all_flights, all_dists = [], [], []
@@ -204,8 +239,6 @@ def extract_combined_window(events, start: int, window_size: int,
 
     where stats_21 is a list of 21 floats and the remaining 4 values
     are from the LAST keystroke in the window.
-
-    Returns None if extraction fails (too short, NaN, empty refs).
     """
     if not ref_dwells or not ref_flights or not ref_dists:
         return None
@@ -213,9 +246,9 @@ def extract_combined_window(events, start: int, window_size: int,
     if len(w) < window_size:
         return None
 
-    d_arr = np.array([e[1] for e in w], dtype=float)   # dwell_ms
-    f_arr = np.array([e[2] for e in w], dtype=float)   # flight_ms
-    q_arr = np.array([e[3] for e in w], dtype=float)   # qwerty dist
+    d_arr = np.array([e[1] for e in w], dtype=float)
+    f_arr = np.array([e[2] for e in w], dtype=float)
+    q_arr = np.array([e[3] for e in w], dtype=float)
 
     fd = extract_features(d_arr, ref_dwells,  window_size)
     ff = extract_features(f_arr, ref_flights, window_size)
@@ -224,20 +257,15 @@ def extract_combined_window(events, start: int, window_size: int,
     if fd is None or ff is None or fq is None:
         return None
 
-    stats = fd + ff + fq   # 21 floats
+    stats = fd + ff + fq   # 21 floats: 0-6 dwell, 7-13 flight, 14-20 dist
 
-    last = w[-1]           # (key_idx, dwell_ms, flight_ms, dist_units)
+    last = w[-1]
     return stats, last[0], float(last[1]), float(last[2]), float(last[3])
 
 
 def get_file_combined_seq(events, window_size: int, window_step: int,
                           ref_dwells, ref_flights, ref_dists) -> list:
-    """
-    Extract the full per-window feature sequence for one file.
-
-    Returns a list of 5-tuples (stats, key_idx, dwell, flight, dist),
-    one per valid sliding window.  Empty list if file is too short.
-    """
+    """Extract the full per-window feature sequence for one file."""
     n   = len(events)
     seq = []
     for start in range(0, n - window_size + 1, window_step):
@@ -249,20 +277,12 @@ def get_file_combined_seq(events, window_size: int, window_step: int,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. Detection (first-crossing, with short-file handling)
+# 4. Detection
 # ──────────────────────────────────────────────────────────────────────────────
 def apply_detection(seqs: list, mode: str, thresh: float,
                     warmup: int = WARMUP_STEPS,
                     labels: list = None) -> list:
-    """
-    Apply file-level detection to per-window anomaly score sequences.
-
-    mode='first_crossing' : Bot if any post-warmup score >= thresh.
-    mode='mean'           : Bot if mean(post-warmup scores) >= thresh.
-
-    Files with no post-warmup windows are always treated as misclassified;
-    pass `labels` to enable this behaviour.
-    """
+    """Apply file-level detection to per-window anomaly score sequences."""
     preds = []
     for i, seq in enumerate(seqs):
         post = seq[warmup:]

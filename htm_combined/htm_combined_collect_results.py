@@ -44,7 +44,17 @@ def format_row(rank: int, r: dict) -> str:
     total   = r.get("n_bots_total",  "?")
     b_sc    = r.get("mean_bot_score",   0.0)
     h_sc    = r.get("mean_human_score", 0.0)
-    if "stats_enc_bits" in cfg:
+    if "dwell_stats_enc_bits" in cfg:
+        # Round 3: fully per-channel / per-scalar
+        enc_str = (
+            f"dS={cfg.get('dwell_stats_enc_bits','?')}w{cfg.get('dwell_stats_enc_w','?')} "
+            f"fS={cfg.get('flight_stats_enc_bits','?')}w{cfg.get('flight_stats_enc_w','?')} "
+            f"qS={cfg.get('dist_stats_enc_bits','?')}w{cfg.get('dist_stats_enc_w','?')} "
+            f"dK={cfg.get('dwell_scalar_enc_bits','?')}w{cfg.get('dwell_scalar_enc_w','?')} "
+            f"fK={cfg.get('flight_scalar_enc_bits','?')}w{cfg.get('flight_scalar_enc_w','?')} "
+            f"qK={cfg.get('dist_scalar_enc_bits','?')}w{cfg.get('dist_scalar_enc_w','?')}"
+        )
+    elif "stats_enc_bits" in cfg:
         enc_str = (f"se={cfg.get('stats_enc_bits','?')}w{cfg.get('stats_enc_w','?')} "
                    f"ke={cfg.get('scalar_enc_bits','?')}w{cfg.get('scalar_enc_w','?')}")
     else:

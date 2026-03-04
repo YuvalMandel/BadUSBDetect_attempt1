@@ -367,35 +367,58 @@ rm -rf ds_models/ ds_results/ ds_plots/ ds_configs/
 
 ## HTM-Combined hyperparameter search on Newton SLURM
 
-Full hybrid variant that concatenates **both** the 21-dim statistical window features
-and the last-keystroke identity (key one-hot + dwell + flight + dist) into a single SDR.
+Full hybrid variant. Each HTM timestep encodes a sliding window of keystrokes as:
+- **21-dim window statistics** (7 stats × 3 channels: dwell times, flight times, QWERTY distances)
+- **Last-keystroke identity**: key one-hot (95 bits) + dwell + flight + dist scalars
 
-### SDR layout
+### SDR layout (Round 3 — per-channel / per-scalar encoders)
 
 ```
-[ stats_block (21 features) | key_one_hot (95 bits) | dwell | flight | dist ]
-  21 × stats_enc_bits         fixed                   scalar_enc_bits × 3
+[ dwell_stats | flight_stats | dist_stats | key_one_hot | dwell_key | flight_key | dist_key ]
+  7×d_sb        7×f_sb        7×q_sb       95 bits       d_kb        f_kb         q_kb
 ```
 
-| Block | Bits | Active | Encoding range |
-|-------|------|--------|----------------|
-| Stats (21 × 7 stats per channel) | `21 × stats_enc_bits` | `21 × stats_enc_w` | Data-derived (fitted on training windows) |
-| Key one-hot (95 printable ASCII) | 95 | 1 | Fixed (one-hot) |
-| Dwell + flight + dist (3 scalars) | `3 × scalar_enc_bits` | `3 × scalar_enc_w` | Fixed physical ranges |
+| Block | Bits | Active | Range |
+|-------|------|--------|-------|
+| Dwell statistics (7 features) | `7 × dwell_stats_enc_bits` | `7 × dwell_stats_enc_w` | Data-derived |
+| Flight statistics (7 features) | `7 × flight_stats_enc_bits` | `7 × flight_stats_enc_w` | Data-derived |
+| QWERTY-dist statistics (7 features) | `7 × dist_stats_enc_bits` | `7 × dist_stats_enc_w` | Data-derived |
+| Key one-hot (95 printable ASCII) | 95 | 1 | Fixed |
+| Last-key dwell time | `dwell_scalar_enc_bits` | `dwell_scalar_enc_w` | 0–400 ms |
+| Last-key flight time | `flight_scalar_enc_bits` | `flight_scalar_enc_w` | 0–500 ms |
+| Last-key QWERTY dist | `dist_scalar_enc_bits` | `dist_scalar_enc_w` | 0–12 units |
 
-Stats and scalar blocks have **independent** `enc_bits` / `enc_w` settings, allowing
-the search to decouple resolution on the 21-dim stats features from the per-keystroke scalars.
+All 24 scalar-encoded parameters have **independent** `enc_bits` / `enc_w`.
 
-### Step 1 — Prepare data (run once)
+---
 
-Reuses `split.pkl` and `stats_cache.pkl` from the HTM-Distance-Stats pipeline.
+### Before running Round 3 — what to delete
+
+The encoder structure changed between rounds. Here is exactly what to clean and why:
+
+| Directory | Delete? | Reason |
+|-----------|---------|--------|
+| `hc_configs/` | Auto-deleted | `generate_configs.py` removes old configs automatically |
+| `hc_models/` | **Yes — delete** | Old `.pkl` files store a `CombinedEncoder` with the old API; they will not load correctly with the new class |
+| `hc_plots/` | Yes (recommended) | Stale plots from old configs; takes disk space |
+| `hc_results/` | **No — keep** | Old result JSONs are backward-compatible; the leaderboard script handles all 3 config formats. Keeping them preserves Round 1/2 comparisons and the cumulative config index |
+| `stats_cache.pkl` | **No** | Unchanged — reused directly |
+| `split.pkl` | **No** | Unchanged |
 
 ```bash
-python htm/htm_prepare_data.py                              # creates split.pkl if needed
-python htm_distance_stats/htm_distance_stats_prepare_data.py  # creates stats_cache.pkl
+# Run this before generating Round 3 configs:
+rm -rf hc_models/ hc_plots/
+# hc_configs/ is cleaned automatically; hc_results/ should be kept
 ```
 
-If `stats_cache.pkl` already exists, nothing needs to be redone.
+---
+
+### Step 1 — Prepare data (run once, already done if stats_cache.pkl exists)
+
+```bash
+python htm/htm_prepare_data.py                               # creates split.pkl if needed
+python htm_distance_stats/htm_distance_stats_prepare_data.py # creates stats_cache.pkl
+```
 
 ### Step 2 — Generate configs and SLURM script
 
@@ -403,21 +426,16 @@ If `stats_cache.pkl` already exists, nothing needs to be redone.
 python htm_combined/htm_combined_generate_configs.py --n-configs 128 --seed 0
 ```
 
-**Cumulative workflow** — results are never deleted between rounds:
-- Scans `hc_results/hc*.json` to find the highest completed `config_idx`
-- **Deletes old `hc_configs/config_*.json`** (already-run; results preserved)
+- Scans `hc_results/hc*.json` to find the highest completed `config_idx` (continues cumulatively)
+- **Auto-deletes** old `hc_configs/config_*.json` (already-run; results preserved)
 - Writes new configs numbered `last_idx + 1` … `last_idx + N`
 - Writes `slurm/hc_submit_array.sh`
-
-First run starts at index 0. Each subsequent call continues from the last completed index.
 
 ### Step 3 — Submit to Newton
 
 ```bash
 sbatch slurm/hc_submit_array.sh
 ```
-
-Monitor:
 
 ```bash
 squeue -u $USER
@@ -427,22 +445,25 @@ ls hc_results/ | wc -l   # jobs finished so far
 ### Step 4 — Collect results
 
 ```bash
-python htm_combined/htm_combined_collect_results.py --top 20
+python htm_combined/htm_combined_collect_results.py --top 30
 ```
 
-Reads `hc_results/hc*.json`, prints ranked leaderboard, writes
+Reads all `hc_results/hc*.json` (all rounds), prints ranked leaderboard, writes
 `hc_results/leaderboard.txt` and `hc_results/leaderboard.csv`.
 
-### Clean for a completely fresh start
+> The leaderboard script handles all config generations automatically:
+> Round 1 (shared `enc_bits_per_feature`), Round 2 (split `stats_enc_bits`/`scalar_enc_bits`),
+> Round 3 (per-channel `dwell_stats_enc_bits` etc.) all display correctly.
 
-Only needed if the encoder logic or data parsing changed (not for a normal next-round search):
+### Clean for a fully fresh start (discard all results)
+
+Only if you want to restart from config index 0:
 
 ```bash
 rm -rf hc_configs/ hc_models/ hc_results/ hc_plots/
 ```
 
-> **Do not delete** `stats_cache.pkl`, `split.pkl`, or any `ds_*` / `dist_*` artifacts —
-> these are shared with the upstream pipelines.
+> Never delete `stats_cache.pkl`, `split.pkl`, `dist_cache.pkl`, or any `ds_*`/`dist_*` dirs.
 
 ### HTM-Combined search space
 
@@ -480,7 +501,36 @@ Key changes from Round 1:
 | Enc (scalar) | `scalar_enc_w` | **New param**: 3, 5, 7 |
 | Det | `warmup_steps` | Narrowed to 2, 3 (0/1 → degenerate thresh=1.0 in Round 1) |
 
-Default anchored on hc0021: `sp=30 pct=0.8, se=16w9, ke=16w7, ws=5s1, tm=16, act=13, wu=2, al=15`.
+Best Round 2: `hc0036` — val BAcc=0.8750, **test F1=0.9189**, caught 17/18 bots,
+mean detection window=2.0. Key params: `sp=30 pct=0.8, se=32w5, ke=8w5, ws=5s1, tm=16, act=10, wu=2, al=15`.
+
+#### Round 3 (configs 0248+)
+
+All 24 scalar-encoded parameters now have **independent** `enc_bits` / `enc_w`:
+
+| Group | Parameters | Values | Notes |
+|-------|-----------|--------|-------|
+| Dwell stats (7 features) | `dwell_stats_enc_bits` / `dwell_stats_enc_w` | bits: 16, 24, 32 / w: 5, 7, 9 | 7 statistics of dwell-time distribution |
+| Flight stats (7 features) | `flight_stats_enc_bits` / `flight_stats_enc_w` | bits: 16, 24, 32 / w: 5, 7, 9 | 7 statistics of flight-time distribution |
+| Dist stats (7 features) | `dist_stats_enc_bits` / `dist_stats_enc_w` | bits: 16, 24, 32 / w: 5, 7, 9 | 7 statistics of QWERTY-distance distribution |
+| Dwell scalar (1 feature) | `dwell_scalar_enc_bits` / `dwell_scalar_enc_w` | bits: 8, 16 / w: 3, 5, 7 | Last-keystroke dwell time (0–400 ms) |
+| Flight scalar (1 feature) | `flight_scalar_enc_bits` / `flight_scalar_enc_w` | bits: 8, 16 / w: 3, 5, 7 | Last-keystroke flight time (0–500 ms) |
+| Dist scalar (1 feature) | `dist_scalar_enc_bits` / `dist_scalar_enc_w` | bits: 8, 16 / w: 3, 5, 7 | Last-keystroke QWERTY distance (0–12 u) |
+
+Round-2 analysis (top-20 configs) motivating the changes:
+- `scalar_enc_bits=8` appeared in 75% of top-20; 24 narrowed out, range narrowed to 8/16
+- `stats_enc_bits` evenly distributed across 16/24/32 → all values kept per channel
+- `tm_maxNewSynapseCount=30` dominant (40%); 15 dropped
+- `scalar_enc_w=7` dominant (65%)
+
+Config slug format (Round 3):
+```
+hc{idx}_sp{act}_d{dsb}w{dsw}_f{fsb}w{fsw}_q{qsb}w{qsw}_dk{dkb}w{dkw}_fk{fkb}w{fkw}_qk{qkb}w{qkw}_ws{ws}s{step}_tm{cells}_act{act}_wu{wu}_al{al}
+```
+
+**Backward compatibility**: `htm_combined_train_single.py` supports all 3 config formats via `_get_enc_params(cfg)`. Old result files continue to load and run correctly.
+
+Default anchored on Round-2 winner hc0036: `sp=30 pct=0.8, all_stats=32w5, all_scalars=8w5, ws=5s1, tm=16, act=10, wu=2, al=15`.
 
 ---
 

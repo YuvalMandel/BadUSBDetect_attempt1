@@ -72,18 +72,61 @@ for _d in (MODELS_DIR, PLOTS_DIR, RESULTS_DIR):
     os.makedirs(_d, exist_ok=True)
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Backward-compatible encoder parameter extraction
+#   Round 1: shared enc_bits_per_feature / enc_w
+#   Round 2: split stats_enc_bits/stats_enc_w + scalar_enc_bits/scalar_enc_w
+#   Round 3: fully independent 6-pair system (dwell/flight/dist × stats/scalar)
+# ──────────────────────────────────────────────────────────────────────────────
+def _get_enc_params(cfg: dict) -> dict:
+    """Return the 12 encoder hyperparams for any config generation."""
+    if "dwell_stats_enc_bits" in cfg:
+        # Round 3: fully per-channel / per-scalar
+        return {k: cfg[k] for k in (
+            "dwell_stats_enc_bits",  "dwell_stats_enc_w",
+            "flight_stats_enc_bits", "flight_stats_enc_w",
+            "dist_stats_enc_bits",   "dist_stats_enc_w",
+            "dwell_scalar_enc_bits", "dwell_scalar_enc_w",
+            "flight_scalar_enc_bits","flight_scalar_enc_w",
+            "dist_scalar_enc_bits",  "dist_scalar_enc_w",
+        )}
+    elif "stats_enc_bits" in cfg:
+        # Round 2: split stats/scalar (same value across channels)
+        sb, sw = cfg["stats_enc_bits"], cfg["stats_enc_w"]
+        kb, kw = cfg["scalar_enc_bits"], cfg["scalar_enc_w"]
+        return dict(
+            dwell_stats_enc_bits=sb,  dwell_stats_enc_w=sw,
+            flight_stats_enc_bits=sb, flight_stats_enc_w=sw,
+            dist_stats_enc_bits=sb,   dist_stats_enc_w=sw,
+            dwell_scalar_enc_bits=kb, dwell_scalar_enc_w=kw,
+            flight_scalar_enc_bits=kb,flight_scalar_enc_w=kw,
+            dist_scalar_enc_bits=kb,  dist_scalar_enc_w=kw,
+        )
+    else:
+        # Round 1: single shared encoder for all 24 parameters
+        b, w = cfg["enc_bits_per_feature"], cfg["enc_w"]
+        return dict(
+            dwell_stats_enc_bits=b,  dwell_stats_enc_w=w,
+            flight_stats_enc_bits=b, flight_stats_enc_w=w,
+            dist_stats_enc_bits=b,   dist_stats_enc_w=w,
+            dwell_scalar_enc_bits=b, dwell_scalar_enc_w=w,
+            flight_scalar_enc_bits=b,flight_scalar_enc_w=w,
+            dist_scalar_enc_bits=b,  dist_scalar_enc_w=w,
+        )
+
+
 # ── Slug / title helpers ──────────────────────────────────────────────────────
 def _base_slug(cfg, idx):
-    # Support both old (enc_bits_per_feature/enc_w) and new (split) configs
-    if "stats_enc_bits" in cfg:
-        enc_part = (f"_se{cfg['stats_enc_bits']}w{cfg['stats_enc_w']}"
-                    f"_ke{cfg['scalar_enc_bits']}w{cfg['scalar_enc_w']}")
-    else:
-        enc_part = f"_enc{cfg['enc_bits_per_feature']}w{cfg['enc_w']}"
+    ep = _get_enc_params(cfg)
     return (
         f"hc{idx:04d}"
         f"_sp{cfg['sp_numActiveColumns']}"
-        f"{enc_part}"
+        f"_d{ep['dwell_stats_enc_bits']}w{ep['dwell_stats_enc_w']}"
+        f"_f{ep['flight_stats_enc_bits']}w{ep['flight_stats_enc_w']}"
+        f"_q{ep['dist_stats_enc_bits']}w{ep['dist_stats_enc_w']}"
+        f"_dk{ep['dwell_scalar_enc_bits']}w{ep['dwell_scalar_enc_w']}"
+        f"_fk{ep['flight_scalar_enc_bits']}w{ep['flight_scalar_enc_w']}"
+        f"_qk{ep['dist_scalar_enc_bits']}w{ep['dist_scalar_enc_w']}"
         f"_ws{cfg['window_size']}s{cfg.get('window_step', 1)}"
         f"_tm{cfg['tm_cellsPerColumn']}"
         f"_act{cfg['tm_activationThreshold']}"
@@ -97,11 +140,15 @@ def _full_slug(base, val_f1, test_f1):
 
 
 def _plot_title(cfg, idx, val_bacc, val_f1, test_f1):
-    if "stats_enc_bits" in cfg:
-        enc_str = (f"sEnc={cfg['stats_enc_bits']}w{cfg['stats_enc_w']} "
-                   f"kEnc={cfg['scalar_enc_bits']}w{cfg['scalar_enc_w']}")
-    else:
-        enc_str = f"enc={cfg['enc_bits_per_feature']}w{cfg['enc_w']}"
+    ep = _get_enc_params(cfg)
+    enc_str = (
+        f"dS={ep['dwell_stats_enc_bits']}w{ep['dwell_stats_enc_w']} "
+        f"fS={ep['flight_stats_enc_bits']}w{ep['flight_stats_enc_w']} "
+        f"qS={ep['dist_stats_enc_bits']}w{ep['dist_stats_enc_w']}  "
+        f"dK={ep['dwell_scalar_enc_bits']}w{ep['dwell_scalar_enc_w']} "
+        f"fK={ep['flight_scalar_enc_bits']}w{ep['flight_scalar_enc_w']} "
+        f"qK={ep['dist_scalar_enc_bits']}w{ep['dist_scalar_enc_w']}"
+    )
     return (
         f"HTM-Combined {idx:04d}  "
         f"SP: act={cfg['sp_numActiveColumns']} pct={cfg['sp_potentialPct']} "
@@ -300,30 +347,20 @@ def main():
     print(f"  Training windows: {n_windows} from {len(train_seqs)} files")
 
     # ── Build HTM ─────────────────────────────────────────────────
-    # Support both old (enc_bits_per_feature/enc_w) and new (split) configs
-    if "stats_enc_bits" in cfg:
-        stats_enc_bits  = cfg["stats_enc_bits"]
-        stats_enc_w     = cfg["stats_enc_w"]
-        scalar_enc_bits = cfg["scalar_enc_bits"]
-        scalar_enc_w    = cfg["scalar_enc_w"]
-    else:
-        stats_enc_bits  = cfg["enc_bits_per_feature"]
-        stats_enc_w     = cfg["enc_w"]
-        scalar_enc_bits = cfg["enc_bits_per_feature"]
-        scalar_enc_w    = cfg["enc_w"]
-
-    encoder     = CombinedEncoder(min_v, max_v,
-                                  stats_enc_bits=stats_enc_bits,
-                                  stats_enc_w=stats_enc_w,
-                                  scalar_enc_bits=scalar_enc_bits,
-                                  scalar_enc_w=scalar_enc_w)
+    ep       = _get_enc_params(cfg)
+    encoder  = CombinedEncoder(min_v, max_v, **ep)
     input_width = encoder.total_bits
     col_dims    = cfg['sp_columnDimensions']
 
-    total_expected = 21 * stats_enc_bits + 95 + 3 * scalar_enc_bits
+    stats_total  = 7 * (ep['dwell_stats_enc_bits'] + ep['flight_stats_enc_bits']
+                        + ep['dist_stats_enc_bits'])
+    scalar_total = (ep['dwell_scalar_enc_bits'] + ep['flight_scalar_enc_bits']
+                    + ep['dist_scalar_enc_bits'])
     print(f"  SDR: {input_width} total bits  "
-          f"(21x{stats_enc_bits} stats + 95 key + 3x{scalar_enc_bits} scalars "
-          f"= {total_expected})")
+          f"(7×[{ep['dwell_stats_enc_bits']}+{ep['flight_stats_enc_bits']}+"
+          f"{ep['dist_stats_enc_bits']}]={stats_total} stats "
+          f"+ 95 key + [{ep['dwell_scalar_enc_bits']}+{ep['flight_scalar_enc_bits']}+"
+          f"{ep['dist_scalar_enc_bits']}]={scalar_total} scalars)")
 
     sp = SpatialPooler(
         inputDimensions           =(input_width,),
