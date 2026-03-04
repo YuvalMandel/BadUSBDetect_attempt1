@@ -2,9 +2,14 @@
 htm_combined/htm_combined_generate_configs.py
 Generate random HTM-Combined hyperparameter configs and a SLURM script.
 
-Search space anchored on the best results from both parent models:
-  * HTM-Distance-Stats best (ds0148): sp=30, enc=24w7, ws=10s1, tm=16, act=10, wu=3, al=5
-  * HTM-Distance best (dist0121):     sp=40, enc=16w9, tm=16, act=13, wu=5, al=15
+Search space refined from round-1 results (122 runs):
+  Best config hc0021: sp=30, enc=16w9, ws=5s1, tm=16, act=13, wu=2, al=15
+  Top-5 all use enc_bits=16, enc_w=7 or 9, ws=5-20, warmup=2-3.
+
+New in this round: stats block and per-keystroke scalar block have
+  INDEPENDENT encoder settings (stats_enc_bits/stats_enc_w vs
+  scalar_enc_bits/scalar_enc_w), allowing the search to decouple
+  resolution on the 21-dim stats features from dwell/flight/dist scalars.
 
 Cumulative workflow -- results are never deleted:
   Each run finds the highest config_idx already present in hc_results/,
@@ -39,9 +44,9 @@ from pathlib import Path
 #   suppresses the early high-anomaly spike so warmup=0 is now safe.
 # ──────────────────────────────────────────────────────────────────────────────
 PARAM_SPACE = {
-    # SpatialPooler
+    # SpatialPooler — narrowed around top-5 winners
     "sp_columnDimensions":    [2048],
-    "sp_numActiveColumns":    [20, 25, 30, 35, 40],
+    "sp_numActiveColumns":    [25, 30, 35],          # dropped 20, 40
     "sp_potentialPct":        [0.65, 0.80],
     "sp_synPermActiveInc":    [0.02, 0.05],
     "sp_synPermConnected":    [0.10, 0.20],
@@ -55,39 +60,47 @@ PARAM_SPACE = {
     "tm_maxNewSynapseCount":  [15, 20, 25, 30],
     "tm_permanenceIncrement": [0.05, 0.10],
     "tm_permanenceDecrement": [0.05, 0.10],
-    # Encoder (shared for stats block and last-keystroke scalars)
-    "enc_bits_per_feature":   [16, 24, 32],
-    "enc_w":                  [5, 7, 9],
+    # Stats-block encoder (21 features, data-derived ranges)
+    # enc_bits=16 dominated round-1 top-5; keep 24 for coverage
+    "stats_enc_bits":         [16, 24, 32],
+    "stats_enc_w":            [5, 7, 9],
+    # Per-keystroke scalar encoder (dwell, flight, dist — fixed physical ranges)
+    # Can be smaller/different from stats block
+    "scalar_enc_bits":        [8, 16, 24],
+    "scalar_enc_w":           [3, 5, 7],
     # Window
     "window_size":            [5, 10, 15, 20],
     "window_step":            [1, 2],
-    # Detection
-    "warmup_steps":           [0, 1, 2, 3],   # in windows
+    # Detection — warmup 0/1 correlated with degenerate configs; focus on 2-3
+    "warmup_steps":           [2, 3],
     "al_period":              [5, 10, 15],
 }
 
-# Default: anchored on best HTM-Distance-Stats config (ds0148)
+# Default: anchored on round-1 winner hc0021
+# (sp=30, enc=16w9, ws=5s1, tm=16, act=13, wu=2, al=15)
 DEFAULT_CONFIG = {
     "sp_columnDimensions":    2048,
     "sp_numActiveColumns":    30,
-    "sp_potentialPct":        0.65,
+    "sp_potentialPct":        0.80,
     "sp_synPermActiveInc":    0.02,
     "sp_synPermConnected":    0.10,
     "sp_synPermInactiveDec":  0.005,
     "tm_cellsPerColumn":      16,
-    "tm_activationThreshold": 10,
+    "tm_activationThreshold": 13,
     "tm_initialPermanence":   0.21,
     "tm_connectedPermanence": 0.50,
-    "tm_minThreshold":        8,
+    "tm_minThreshold":        10,
     "tm_maxNewSynapseCount":  20,
     "tm_permanenceIncrement": 0.05,
     "tm_permanenceDecrement": 0.05,
-    "enc_bits_per_feature":   24,
-    "enc_w":                  7,
-    "window_size":            10,
+    "stats_enc_bits":         16,
+    "stats_enc_w":            9,
+    "scalar_enc_bits":        16,
+    "scalar_enc_w":           7,
+    "window_size":            5,
     "window_step":            1,
-    "warmup_steps":           3,
-    "al_period":              5,
+    "warmup_steps":           2,
+    "al_period":              15,
     "seed":                   42,
 }
 
@@ -96,7 +109,9 @@ DEFAULT_CONFIG = {
 # Validity constraints
 # ──────────────────────────────────────────────────────────────────────────────
 def is_valid(cfg: dict) -> bool:
-    if cfg["enc_w"] >= cfg["enc_bits_per_feature"]:
+    if cfg["stats_enc_w"] >= cfg["stats_enc_bits"]:
+        return False
+    if cfg["scalar_enc_w"] >= cfg["scalar_enc_bits"]:
         return False
     if cfg["tm_minThreshold"] > cfg["tm_activationThreshold"]:
         return False

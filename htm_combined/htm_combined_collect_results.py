@@ -44,10 +44,15 @@ def format_row(rank: int, r: dict) -> str:
     total   = r.get("n_bots_total",  "?")
     b_sc    = r.get("mean_bot_score",   0.0)
     h_sc    = r.get("mean_human_score", 0.0)
+    if "stats_enc_bits" in cfg:
+        enc_str = (f"se={cfg.get('stats_enc_bits','?')}w{cfg.get('stats_enc_w','?')} "
+                   f"ke={cfg.get('scalar_enc_bits','?')}w{cfg.get('scalar_enc_w','?')}")
+    else:
+        enc_str = f"enc={cfg.get('enc_bits_per_feature','?')}w{cfg.get('enc_w','?')}"
     key = (
         f"sp_act={cfg.get('sp_numActiveColumns','?'):>2} "
         f"pct={cfg.get('sp_potentialPct','?')} "
-        f"enc={cfg.get('enc_bits_per_feature','?')}w{cfg.get('enc_w','?')} "
+        f"{enc_str} "
         f"ws={cfg.get('window_size','?')}s{cfg.get('window_step','?')} "
         f"tm={cfg.get('tm_cellsPerColumn','?')} "
         f"act={cfg.get('tm_activationThreshold','?')} "

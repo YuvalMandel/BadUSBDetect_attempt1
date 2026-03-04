@@ -8,21 +8,22 @@ Design: each HTM timestep encodes ONE sliding window of printable keystrokes.
     7 statistics x 3 channels (dwell times, flight times, QWERTY distances)
     over ALL keystrokes in the window, identical to htm_distance_stats/.
 
-  Block 2 -- Last-keystroke identity (95 + 3 x enc_bits bits, fixed ranges):
+  Block 2 -- Last-keystroke identity (95 + 3 x scalar_enc_bits bits, fixed ranges):
     key_type  : one-hot over 95 printable ASCII keys (exactly 1 active bit)
-    dwell_ms  : 0-400 ms   (scalar block, enc_bits bits, enc_w active)
+    dwell_ms  : 0-400 ms   (scalar block, scalar_enc_bits bits, scalar_enc_w active)
     flight_ms : 0-500 ms
     dist_units: 0-12  QWERTY key-units
 
 Full SDR layout (left -> right):
   [ stats_block | key_one_hot | dwell | flight | dist ]
-   21*enc_bits   95 bits      enc_bits enc_bits enc_bits
+   21*stats_enc_bits  95 bits  scalar_enc_bits x3
 
-Total bits   = (21 + 3) * enc_bits + 95  =  24 * enc_bits + 95
-Active bits  = (21 + 3) * enc_w    +  1  =  24 * enc_w    + 1
+Total bits   = 21*stats_enc_bits + 95 + 3*scalar_enc_bits
+Active bits  = 21*stats_enc_w    +  1 + 3*scalar_enc_w
 
 The stats block uses data-derived min/max (fitted on training windows).
 The last-keystroke scalars use fixed physical ranges (same as htm_distance/).
+Stats and scalar blocks can have independent enc_bits / enc_w settings.
 """
 
 import os
@@ -65,63 +66,76 @@ class CombinedEncoder:
 
     Layout:
       [ stats_block | key_one_hot | dwell | flight | dist ]
-       21*enc_bits   95 bits      enc_bits enc_bits enc_bits
+       21*stats_enc_bits  95 bits  scalar_enc_bits x3
 
-    Total bits   = 24 * enc_bits + 95
-    Active bits  = 24 * enc_w    + 1
+    Total bits   = 21*stats_enc_bits + 95 + 3*scalar_enc_bits
+    Active bits  = 21*stats_enc_w    +  1 + 3*scalar_enc_w
 
     min_vals / max_vals (length-21 arrays) define data-derived encoding ranges
     for the stats block.  Last-keystroke scalars use fixed physical ranges.
+    Stats and scalar blocks have independent enc_bits / enc_w settings.
     """
 
     NUM_STATS = NUM_STATS
     KEY_BITS  = NUM_KEYS
 
-    def __init__(self, min_vals, max_vals, enc_bits: int = 24, enc_w: int = 7):
+    def __init__(self, min_vals, max_vals,
+                 stats_enc_bits: int = 16, stats_enc_w: int = 9,
+                 scalar_enc_bits: int = 16, scalar_enc_w: int = 7):
         assert len(min_vals) == self.NUM_STATS, \
             f"Expected {self.NUM_STATS} min_vals, got {len(min_vals)}"
         assert len(max_vals) == self.NUM_STATS, \
             f"Expected {self.NUM_STATS} max_vals, got {len(max_vals)}"
-        assert enc_w < enc_bits, \
-            f"enc_w ({enc_w}) must be < enc_bits ({enc_bits})"
+        assert stats_enc_w < stats_enc_bits, \
+            f"stats_enc_w ({stats_enc_w}) must be < stats_enc_bits ({stats_enc_bits})"
+        assert scalar_enc_w < scalar_enc_bits, \
+            f"scalar_enc_w ({scalar_enc_w}) must be < scalar_enc_bits ({scalar_enc_bits})"
 
-        self.min_vals   = np.array(min_vals, dtype=float)
-        self.max_vals   = np.array(max_vals, dtype=float)
-        self.enc_bits   = enc_bits
-        self.enc_w      = enc_w
-        self.total_bits = self.NUM_STATS * enc_bits + self.KEY_BITS + 3 * enc_bits
-        self._ranges    = np.maximum(self.max_vals - self.min_vals, 1e-9)
+        self.min_vals        = np.array(min_vals, dtype=float)
+        self.max_vals        = np.array(max_vals, dtype=float)
+        self.stats_enc_bits  = stats_enc_bits
+        self.stats_enc_w     = stats_enc_w
+        self.scalar_enc_bits = scalar_enc_bits
+        self.scalar_enc_w    = scalar_enc_w
+        self.total_bits      = (self.NUM_STATS * stats_enc_bits
+                                + self.KEY_BITS
+                                + 3 * scalar_enc_bits)
+        self._ranges         = np.maximum(self.max_vals - self.min_vals, 1e-9)
 
         # Scalar encoders for the last-keystroke features (fixed physical ranges)
-        self._dwell_enc  = SimpleScalarEncoder(DWELL_MIN,  DWELL_MAX,  enc_bits, enc_w)
-        self._flight_enc = SimpleScalarEncoder(FLIGHT_MIN, FLIGHT_MAX, enc_bits, enc_w)
-        self._dist_enc   = SimpleScalarEncoder(DIST_MIN,   DIST_MAX,   enc_bits, enc_w)
+        self._dwell_enc  = SimpleScalarEncoder(DWELL_MIN,  DWELL_MAX,
+                                               scalar_enc_bits, scalar_enc_w)
+        self._flight_enc = SimpleScalarEncoder(FLIGHT_MIN, FLIGHT_MAX,
+                                               scalar_enc_bits, scalar_enc_w)
+        self._dist_enc   = SimpleScalarEncoder(DIST_MIN,   DIST_MAX,
+                                               scalar_enc_bits, scalar_enc_w)
 
     def encode(self, stats_features, key_idx: int,
                dwell: float, flight: float, distance: float) -> np.ndarray:
         """Encode a combined feature set into a dense binary uint8 SDR."""
-        dense    = np.zeros(self.total_bits, dtype=np.uint8)
-        enc_bits = self.enc_bits
-        enc_w    = self.enc_w
+        dense            = np.zeros(self.total_bits, dtype=np.uint8)
+        stats_enc_bits   = self.stats_enc_bits
+        stats_enc_w      = self.stats_enc_w
+        scalar_enc_bits  = self.scalar_enc_bits
 
         # ── Block 1: stats (21 features, data-derived ranges) ────────────────
         for i in range(self.NUM_STATS):
             val = float(np.clip(stats_features[i], self.min_vals[i], self.max_vals[i]))
             pos = (val - self.min_vals[i]) / self._ranges[i]
-            idx = int(pos * (enc_bits - enc_w))
-            idx = max(0, min(enc_bits - enc_w, idx))
-            offset = i * enc_bits
-            for j in range(enc_w):
+            idx = int(pos * (stats_enc_bits - stats_enc_w))
+            idx = max(0, min(stats_enc_bits - stats_enc_w, idx))
+            offset = i * stats_enc_bits
+            for j in range(stats_enc_w):
                 dense[offset + idx + j] = 1
 
         # ── Block 2: key one-hot (95 bits, exactly 1 active) ─────────────────
-        key_offset = self.NUM_STATS * enc_bits
+        key_offset = self.NUM_STATS * stats_enc_bits
         dense[key_offset + max(0, min(self.KEY_BITS - 1, key_idx))] = 1
 
         # ── Block 3: last-keystroke scalars ───────────────────────────────────
         offset = key_offset + self.KEY_BITS
-        self._dwell_enc.encode_into(dwell, dense, offset);    offset += enc_bits
-        self._flight_enc.encode_into(flight, dense, offset);  offset += enc_bits
+        self._dwell_enc.encode_into(dwell, dense, offset);    offset += scalar_enc_bits
+        self._flight_enc.encode_into(flight, dense, offset);  offset += scalar_enc_bits
         self._dist_enc.encode_into(distance, dense, offset)
 
         return dense

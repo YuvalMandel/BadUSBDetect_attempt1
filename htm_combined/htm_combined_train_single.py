@@ -74,10 +74,16 @@ for _d in (MODELS_DIR, PLOTS_DIR, RESULTS_DIR):
 
 # ── Slug / title helpers ──────────────────────────────────────────────────────
 def _base_slug(cfg, idx):
+    # Support both old (enc_bits_per_feature/enc_w) and new (split) configs
+    if "stats_enc_bits" in cfg:
+        enc_part = (f"_se{cfg['stats_enc_bits']}w{cfg['stats_enc_w']}"
+                    f"_ke{cfg['scalar_enc_bits']}w{cfg['scalar_enc_w']}")
+    else:
+        enc_part = f"_enc{cfg['enc_bits_per_feature']}w{cfg['enc_w']}"
     return (
         f"hc{idx:04d}"
         f"_sp{cfg['sp_numActiveColumns']}"
-        f"_enc{cfg['enc_bits_per_feature']}w{cfg['enc_w']}"
+        f"{enc_part}"
         f"_ws{cfg['window_size']}s{cfg.get('window_step', 1)}"
         f"_tm{cfg['tm_cellsPerColumn']}"
         f"_act{cfg['tm_activationThreshold']}"
@@ -91,13 +97,18 @@ def _full_slug(base, val_f1, test_f1):
 
 
 def _plot_title(cfg, idx, val_bacc, val_f1, test_f1):
+    if "stats_enc_bits" in cfg:
+        enc_str = (f"sEnc={cfg['stats_enc_bits']}w{cfg['stats_enc_w']} "
+                   f"kEnc={cfg['scalar_enc_bits']}w{cfg['scalar_enc_w']}")
+    else:
+        enc_str = f"enc={cfg['enc_bits_per_feature']}w{cfg['enc_w']}"
     return (
         f"HTM-Combined {idx:04d}  "
         f"SP: act={cfg['sp_numActiveColumns']} pct={cfg['sp_potentialPct']} "
         f"synInc={cfg['sp_synPermActiveInc']}\n"
         f"TM: cells={cfg['tm_cellsPerColumn']} actThr={cfg['tm_activationThreshold']} "
         f"minThr={cfg['tm_minThreshold']} newSyn={cfg['tm_maxNewSynapseCount']}\n"
-        f"Enc: bits={cfg['enc_bits_per_feature']} w={cfg['enc_w']}  "
+        f"{enc_str}  "
         f"win={cfg['window_size']}x{cfg.get('window_step', 1)}  "
         f"al={cfg.get('al_period', 10)}  warmup={cfg.get('warmup_steps', 0)}  |  "
         f"Val BAcc={val_bacc:.4f}  Val F1={val_f1:.4f}   Test F1={test_f1:.4f}"
@@ -289,15 +300,30 @@ def main():
     print(f"  Training windows: {n_windows} from {len(train_seqs)} files")
 
     # ── Build HTM ─────────────────────────────────────────────────
+    # Support both old (enc_bits_per_feature/enc_w) and new (split) configs
+    if "stats_enc_bits" in cfg:
+        stats_enc_bits  = cfg["stats_enc_bits"]
+        stats_enc_w     = cfg["stats_enc_w"]
+        scalar_enc_bits = cfg["scalar_enc_bits"]
+        scalar_enc_w    = cfg["scalar_enc_w"]
+    else:
+        stats_enc_bits  = cfg["enc_bits_per_feature"]
+        stats_enc_w     = cfg["enc_w"]
+        scalar_enc_bits = cfg["enc_bits_per_feature"]
+        scalar_enc_w    = cfg["enc_w"]
+
     encoder     = CombinedEncoder(min_v, max_v,
-                                  enc_bits=cfg['enc_bits_per_feature'],
-                                  enc_w=cfg['enc_w'])
+                                  stats_enc_bits=stats_enc_bits,
+                                  stats_enc_w=stats_enc_w,
+                                  scalar_enc_bits=scalar_enc_bits,
+                                  scalar_enc_w=scalar_enc_w)
     input_width = encoder.total_bits
     col_dims    = cfg['sp_columnDimensions']
 
+    total_expected = 21 * stats_enc_bits + 95 + 3 * scalar_enc_bits
     print(f"  SDR: {input_width} total bits  "
-          f"(24x{cfg['enc_bits_per_feature']} + 95 = "
-          f"{24 * cfg['enc_bits_per_feature'] + 95})")
+          f"(21x{stats_enc_bits} stats + 95 key + 3x{scalar_enc_bits} scalars "
+          f"= {total_expected})")
 
     sp = SpatialPooler(
         inputDimensions           =(input_width,),

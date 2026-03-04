@@ -8,6 +8,7 @@ Two models are implemented:
 | HTM (anomaly)               | `htm/`                | Unsupervised; learns normal typing, flags deviations |
 | HTM-Distance (anomaly)      | `htm_distance/`       | Same as HTM but raw per-keystroke events: key type + dwell + flight + QWERTY distance |
 | HTM-Distance-Stats (anomaly)| `htm_distance_stats/` | Hybrid: sliding windows + 21-dim stats (dwell, flight, QWERTY dist) fed into HTM |
+| HTM-Combined (anomaly)      | `htm_combined/`       | Full hybrid: 21-dim window stats **+** last-keystroke identity (key one-hot + dwell + flight + dist) in a single SDR; stats and scalar encoders have independent resolution settings |
 | MLP (supervised)            | `mlp/`                | Binary classifier trained on labelled windows |
 
 ---
@@ -58,6 +59,12 @@ source /path/to/.venv/bin/activate
 │   ├── htm_distance_stats_collect_results.py   Aggregate ds_results/  →  leaderboard
 │   └── htm_distance_stats_test_model.py        Test a saved model (3 evaluation modes)
 │
+├── htm_combined/
+│   ├── htm_combined_common.py         CombinedEncoder (split stats/scalar settings), reference pool, feature extraction
+│   ├── htm_combined_train_single.py   SLURM worker — train one HTM-combined config
+│   ├── htm_combined_generate_configs.py  Generate hc_configs/ + slurm/hc_submit_array.sh
+│   └── htm_combined_collect_results.py   Aggregate hc_results/  →  leaderboard
+│
 ├── mlp/
 │   ├── mlp_prepare_data.py    Parse raw files → train/val/test CSV + reference pool
 │   ├── mlp_balance_train.py   Balance the training CSV (trim human majority)
@@ -85,6 +92,11 @@ source /path/to/.venv/bin/activate
 ├── ds_models/             Trained HTM-distance-stats pkl files [gitignored]
 ├── ds_plots/              HTM-distance-stats PNG plots         [gitignored]
 ├── ds_results/            HTM-distance-stats per-run JSON + leaderboard [gitignored]
+├── hc_configs/            JSON HTM-combined configs for current batch [gitignored per-run]
+│   └── config_NNNN.json
+├── hc_models/             Trained HTM-combined pkl files      [gitignored]
+├── hc_plots/              HTM-combined PNG plots              [gitignored]
+├── hc_results/            HTM-combined per-run JSON + leaderboard [gitignored]
 ├── mlp_models/            Trained MLP model pth files        [gitignored]
 ├── mlp_plots/             MLP PNG plots                      [gitignored]
 ├── mlp_results/           MLP per-run JSON + leaderboard     [gitignored]
@@ -93,6 +105,7 @@ source /path/to/.venv/bin/activate
     ├── submit_array.sh        Generated HTM SLURM submission script
     ├── dist_submit_array.sh   Generated HTM-distance SLURM submission script
     ├── ds_submit_array.sh     Generated HTM-distance-stats SLURM submission script
+    ├── hc_submit_array.sh     Generated HTM-combined SLURM submission script
     └── mlp_submit_array.sh    Generated MLP SLURM submission script
 ```
 
@@ -349,6 +362,125 @@ Threshold selection: **balanced accuracy** = (TPR + TNR) / 2 — avoids the thre
 rm stats_cache.pkl
 rm -rf ds_models/ ds_results/ ds_plots/ ds_configs/
 ```
+
+---
+
+## HTM-Combined hyperparameter search on Newton SLURM
+
+Full hybrid variant that concatenates **both** the 21-dim statistical window features
+and the last-keystroke identity (key one-hot + dwell + flight + dist) into a single SDR.
+
+### SDR layout
+
+```
+[ stats_block (21 features) | key_one_hot (95 bits) | dwell | flight | dist ]
+  21 × stats_enc_bits         fixed                   scalar_enc_bits × 3
+```
+
+| Block | Bits | Active | Encoding range |
+|-------|------|--------|----------------|
+| Stats (21 × 7 stats per channel) | `21 × stats_enc_bits` | `21 × stats_enc_w` | Data-derived (fitted on training windows) |
+| Key one-hot (95 printable ASCII) | 95 | 1 | Fixed (one-hot) |
+| Dwell + flight + dist (3 scalars) | `3 × scalar_enc_bits` | `3 × scalar_enc_w` | Fixed physical ranges |
+
+Stats and scalar blocks have **independent** `enc_bits` / `enc_w` settings, allowing
+the search to decouple resolution on the 21-dim stats features from the per-keystroke scalars.
+
+### Step 1 — Prepare data (run once)
+
+Reuses `split.pkl` and `stats_cache.pkl` from the HTM-Distance-Stats pipeline.
+
+```bash
+python htm/htm_prepare_data.py                              # creates split.pkl if needed
+python htm_distance_stats/htm_distance_stats_prepare_data.py  # creates stats_cache.pkl
+```
+
+If `stats_cache.pkl` already exists, nothing needs to be redone.
+
+### Step 2 — Generate configs and SLURM script
+
+```bash
+python htm_combined/htm_combined_generate_configs.py --n-configs 128 --seed 0
+```
+
+**Cumulative workflow** — results are never deleted between rounds:
+- Scans `hc_results/hc*.json` to find the highest completed `config_idx`
+- **Deletes old `hc_configs/config_*.json`** (already-run; results preserved)
+- Writes new configs numbered `last_idx + 1` … `last_idx + N`
+- Writes `slurm/hc_submit_array.sh`
+
+First run starts at index 0. Each subsequent call continues from the last completed index.
+
+### Step 3 — Submit to Newton
+
+```bash
+sbatch slurm/hc_submit_array.sh
+```
+
+Monitor:
+
+```bash
+squeue -u $USER
+ls hc_results/ | wc -l   # jobs finished so far
+```
+
+### Step 4 — Collect results
+
+```bash
+python htm_combined/htm_combined_collect_results.py --top 20
+```
+
+Reads `hc_results/hc*.json`, prints ranked leaderboard, writes
+`hc_results/leaderboard.txt` and `hc_results/leaderboard.csv`.
+
+### Clean for a completely fresh start
+
+Only needed if the encoder logic or data parsing changed (not for a normal next-round search):
+
+```bash
+rm -rf hc_configs/ hc_models/ hc_results/ hc_plots/
+```
+
+> **Do not delete** `stats_cache.pkl`, `split.pkl`, or any `ds_*` / `dist_*` artifacts —
+> these are shared with the upstream pipelines.
+
+### HTM-Combined search space
+
+#### Round 1 (configs 0000–0121, 122 runs)
+
+Shared encoder for all 24 scalar parameters (`enc_bits_per_feature` / `enc_w`).
+
+| Group | Parameter | Values |
+|-------|-----------|--------|
+| SP | `numActiveColumns` | 20, 25, 30, 35, 40 |
+| SP | `potentialPct` | 0.65, 0.80 |
+| TM | `cellsPerColumn` | 16, 32 |
+| TM | `activationThreshold` | 10, 13 |
+| TM | `minThreshold` | 8, 10 |
+| Enc (shared) | `enc_bits_per_feature` | 16, 24, 32 |
+| Enc (shared) | `enc_w` | 5, 7, 9 |
+| Win | `window_size` | 5, 10, 15, 20 |
+| Win | `window_step` | 1, 2 |
+| Det | `warmup_steps` | 0, 1, 2, 3 (windows) |
+| Det | `al_period` | 5, 10, 15 |
+
+Best Round 1: `hc0021` — val BAcc=0.8194, **test F1=0.8947**, caught 17/18 bots,
+mean detection window=2.0. Key params: `sp=30, enc=16w9, ws=5s1, tm=16, act=13, wu=2, al=15`.
+
+#### Round 2 (configs 0122+)
+
+Key changes from Round 1:
+
+| Group | Parameter | Change |
+|-------|-----------|--------|
+| SP | `numActiveColumns` | Removed 20, 40 (never in top-5) |
+| Enc (stats) | `stats_enc_bits` | **Split from scalar**: 16, 24, 32 |
+| Enc (stats) | `stats_enc_w` | 5, 7, 9 |
+| Enc (scalar) | `scalar_enc_bits` | **New param**: 8, 16, 24 |
+| Enc (scalar) | `scalar_enc_w` | **New param**: 3, 5, 7 |
+| Det | `warmup_steps` | Narrowed to 2, 3 (0/1 → degenerate thresh=1.0 in Round 1) |
+
+Default anchored on hc0021: `sp=30 pct=0.8, se=16w9, ke=16w7, ws=5s1, tm=16, act=13, wu=2, al=15`.
 
 ---
 
