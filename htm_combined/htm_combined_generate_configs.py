@@ -214,7 +214,7 @@ echo "Config: $CONFIG"
 echo "Node  : $(hostname)"
 echo "========================================"
 
-python htm_combined/htm_combined_train_single.py --config "$CONFIG"
+python -u htm_combined/htm_combined_train_single.py --config "$CONFIG"
 """
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, 'w', newline='\n') as fh:
@@ -241,7 +241,7 @@ def write_prepare_windows_slurm_script(out_path: str = "slurm/hc_prepare_windows
 #SBATCH --array=0-7
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --time=02:00:00
+#SBATCH --time=08:00:00
 ##SBATCH --partition=<partition>
 ##SBATCH --account=<account>
 
@@ -257,7 +257,7 @@ echo "Node  : $(hostname)"
 echo "Start : $(date)"
 echo "========================================"
 
-python htm_combined/htm_combined_prepare_windows.py --task-id $SLURM_ARRAY_TASK_ID
+python -u htm_combined/htm_combined_prepare_windows.py --task-id $SLURM_ARRAY_TASK_ID
 
 echo "========================================"
 echo "End   : $(date)"
