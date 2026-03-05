@@ -61,12 +61,13 @@ from htm_combined_common import (
 )
 
 # ── Output directories ────────────────────────────────────────────────────────
-SPLIT_FILE  = "split.pkl"
-CACHE_FILE  = "stats_cache.pkl"
-DIST_CACHE  = "dist_cache.pkl"    # fallback (same format)
-MODELS_DIR  = "hc_models"
-PLOTS_DIR   = "hc_plots"
-RESULTS_DIR = "hc_results"
+SPLIT_FILE   = "split.pkl"
+CACHE_FILE   = "stats_cache.pkl"
+DIST_CACHE   = "dist_cache.pkl"    # fallback (same format)
+WINDOWS_DIR  = "windows_cache"     # pre-computed per-window feature sequences
+MODELS_DIR   = "hc_models"
+PLOTS_DIR    = "hc_plots"
+RESULTS_DIR  = "hc_results"
 
 for _d in (MODELS_DIR, PLOTS_DIR, RESULTS_DIR):
     os.makedirs(_d, exist_ok=True)
@@ -307,26 +308,51 @@ def main():
     val_bots    = split['val_bots']
     test_bots   = split['test_bots']
 
-    # ── Build reference pool from training human files ────────────
-    print("Building reference pool...")
-    ref_dwells, ref_flights, ref_dists = create_reference_pool(
-        train_human, cache, window_size=window_size, seed=seed)
+    # ── Try loading pre-computed windows cache ─────────────────────
+    wcache = None
+    windows_cache_path = os.path.join(
+        WINDOWS_DIR, f"ws{window_size}s{window_step}.pkl")
 
-    if not ref_dwells or not ref_flights or not ref_dists:
-        print("ERROR: Could not build reference pool (insufficient training data).")
-        sys.exit(1)
+    if os.path.exists(windows_cache_path):
+        print(f"Loading windows cache: {windows_cache_path}")
+        with open(windows_cache_path, 'rb') as fh:
+            wcache = pickle.load(fh)
+        ref_dwells  = wcache['ref_dwells']
+        ref_flights = wcache['ref_flights']
+        ref_dists   = wcache['ref_dists']
+        print(f"  Ref pool: {len(ref_dwells)} dwell / "
+              f"{len(ref_flights)} flight / {len(ref_dists)} dist windows")
+    else:
+        print(f"Windows cache not found at {windows_cache_path}.")
+        print(f"  Hint: run htm_combined/htm_combined_prepare_windows.py first.")
+        print(f"  Falling back to on-the-fly computation (slow)...")
 
-    # ── Pre-compute training features (for encoder range) ─────────
-    print("Pre-computing training features (for encoder range)...")
-    train_seqs: dict = {}
-    for fp in tqdm(train_human, desc="  Features"):
-        events = cache.get(fp)
-        if not events:
-            continue
-        seq = get_file_combined_seq(events, window_size, window_step,
-                                    ref_dwells, ref_flights, ref_dists)
-        if seq:
-            train_seqs[fp] = seq
+    # ── Build reference pool (only when cache is unavailable) ─────
+    if wcache is None:
+        print("Building reference pool...")
+        ref_dwells, ref_flights, ref_dists = create_reference_pool(
+            train_human, cache, window_size=window_size, seed=seed)
+        if not ref_dwells or not ref_flights or not ref_dists:
+            print("ERROR: Could not build reference pool.")
+            sys.exit(1)
+
+    # ── Load / compute training feature sequences ──────────────────
+    if wcache is not None:
+        print("Loading training sequences from windows cache...")
+        train_seqs = {fp: wcache['sequences'][fp]
+                      for fp in train_human if fp in wcache['sequences']}
+        print(f"  {len(train_seqs)}/{len(train_human)} training files in cache")
+    else:
+        print("Pre-computing training features (for encoder range)...")
+        train_seqs = {}
+        for fp in tqdm(train_human, desc="  Features"):
+            events = cache.get(fp)
+            if not events:
+                continue
+            seq = get_file_combined_seq(events, window_size, window_step,
+                                        ref_dwells, ref_flights, ref_dists)
+            if seq:
+                train_seqs[fp] = seq
 
     # Fit min/max for the stats block over all training windows
     all_stats = [item[0] for seq in train_seqs.values() for item in seq]
@@ -411,11 +437,17 @@ def main():
         """Run SP+TM+AL on each file.  Returns (mean_scores, labels, score_seqs)."""
         scores, labels, seqs = [], [], []
         for fp in file_list:
-            events = cache.get(fp)
-            if not events:
+            # Prefer pre-loaded windows cache; fall back to on-the-fly
+            if wcache is not None:
+                seq = wcache['sequences'].get(fp)
+            else:
+                events = cache.get(fp)
+                if not events:
+                    continue
+                seq = get_file_combined_seq(events, window_size, window_step,
+                                            ref_dwells, ref_flights, ref_dists)
+            if not seq:
                 continue
-            seq = get_file_combined_seq(events, window_size, window_step,
-                                        ref_dwells, ref_flights, ref_dists)
             tm.reset()
             raw = []
             for stats, key_idx, dwell, flight, dist in seq:

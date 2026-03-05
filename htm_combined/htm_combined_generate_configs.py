@@ -191,7 +191,7 @@ def write_slurm_script(n_configs: int, out_path: str):
 #SBATCH --array=0-{n_configs - 1}%200
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
-#SBATCH --time=08:00:00
+#SBATCH --time=16:00:00
 ##SBATCH --partition=<partition>
 ##SBATCH --account=<account>
 
@@ -287,8 +287,10 @@ def main():
     print(f"\nWorkflow:")
     print(f"  1. python htm_combined/htm_combined_generate_configs.py "
           f"--n-configs {args.n_configs}")
-    print(f"  2. sbatch slurm/hc_submit_array.sh        # submit {n} jobs")
-    print(f"  3. python htm_combined/htm_combined_collect_results.py")
+    print(f"  2. python htm_combined/htm_combined_prepare_windows.py"
+          f"  # one-time; skips existing caches")
+    print(f"  3. sbatch slurm/hc_submit_array.sh        # submit {n} jobs")
+    print(f"  4. python htm_combined/htm_combined_collect_results.py")
 
 
 if __name__ == "__main__":

@@ -288,8 +288,7 @@ class SimpleScalarEncoder:
         pos   = (value - self.min_val) / self.range
         idx   = int(pos * (self.n_bits - self.w))
         idx   = max(0, min(self.n_bits - self.w, idx))
-        for i in range(self.w):
-            arr[offset + idx + i] = 1
+        arr[offset + idx : offset + idx + self.w] = 1
 
 
 class DistanceEncoder:

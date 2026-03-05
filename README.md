@@ -60,9 +60,10 @@ source /path/to/.venv/bin/activate
 │   └── htm_distance_stats_test_model.py        Test a saved model (3 evaluation modes)
 │
 ├── htm_combined/
-│   ├── htm_combined_common.py         CombinedEncoder (split stats/scalar settings), reference pool, feature extraction
-│   ├── htm_combined_train_single.py   SLURM worker — train one HTM-combined config
+│   ├── htm_combined_common.py            CombinedEncoder (12 independent params), reference pool, feature extraction
+│   ├── htm_combined_train_single.py      SLURM worker — train one HTM-combined config
 │   ├── htm_combined_generate_configs.py  Generate hc_configs/ + slurm/hc_submit_array.sh
+│   ├── htm_combined_prepare_windows.py   One-time cache of per-window stats → windows_cache/
 │   └── htm_combined_collect_results.py   Aggregate hc_results/  →  leaderboard
 │
 ├── mlp/
@@ -402,13 +403,14 @@ The encoder structure changed between rounds. Here is exactly what to clean and 
 | `hc_models/` | **Yes — delete** | Old `.pkl` files store a `CombinedEncoder` with the old API; they will not load correctly with the new class |
 | `hc_plots/` | Yes (recommended) | Stale plots from old configs; takes disk space |
 | `hc_results/` | **No — keep** | Old result JSONs are backward-compatible; the leaderboard script handles all 3 config formats. Keeping them preserves Round 1/2 comparisons and the cumulative config index |
+| `windows_cache/` | **No — keep** | Pre-computed per-window stats; reused across rounds as long as the search space covers the same `(window_size, window_step)` pairs. Delete only if `stats_cache.pkl` changes |
 | `stats_cache.pkl` | **No** | Unchanged — reused directly |
 | `split.pkl` | **No** | Unchanged |
 
 ```bash
 # Run this before generating Round 3 configs:
 rm -rf hc_models/ hc_plots/
-# hc_configs/ is cleaned automatically; hc_results/ should be kept
+# hc_configs/ is cleaned automatically; hc_results/ and windows_cache/ should be kept
 ```
 
 ---
@@ -430,6 +432,24 @@ python htm_combined/htm_combined_generate_configs.py --n-configs 128 --seed 0
 - **Auto-deletes** old `hc_configs/config_*.json` (already-run; results preserved)
 - Writes new configs numbered `last_idx + 1` … `last_idx + N`
 - Writes `slurm/hc_submit_array.sh`
+
+### Step 2.5 — Pre-compute windows cache (one-time, run once per data set)
+
+```bash
+python htm_combined/htm_combined_prepare_windows.py
+```
+
+Computes KS/Wasserstein statistics for every `(window_size, window_step)` pair in the
+search space (8 pairs: `{5,10,15,20} × {1,2}`) across all train/val/test/bot files and
+saves them to `windows_cache/ws{N}s{S}.pkl`.
+
+**Why:** KS/Wasserstein statistics are O(N × num_references) per window per file.
+Without caching, each SLURM job recomputes the same features for its `(window_size, window_step)`.
+With the cache, each job simply loads pre-computed tuples — cutting per-job runtime by ~80-90%.
+
+- Skips any pairs whose cache file already exists (safe to re-run)
+- Uses a fixed reference pool (`RANDOM_SEED`) so results are consistent across all configs
+- Only needs to be re-run if `stats_cache.pkl` or `split.pkl` change
 
 ### Step 3 — Submit to Newton
 

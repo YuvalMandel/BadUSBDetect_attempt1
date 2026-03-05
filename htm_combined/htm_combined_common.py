@@ -151,8 +151,7 @@ class CombinedEncoder:
             val = float(np.clip(stats_features[i], self.min_vals[i], self.max_vals[i]))
             pos = (val - self.min_vals[i]) / self._ranges[i]
             idx = max(0, min(bits - w, int(pos * (bits - w))))
-            for j in range(w):
-                dense[offset + idx + j] = 1
+            dense[offset + idx : offset + idx + w] = 1
             offset += bits
 
         # ── Block 1b: flight stats (features 7-13) ────────────────────────────
@@ -161,8 +160,7 @@ class CombinedEncoder:
             val = float(np.clip(stats_features[i], self.min_vals[i], self.max_vals[i]))
             pos = (val - self.min_vals[i]) / self._ranges[i]
             idx = max(0, min(bits - w, int(pos * (bits - w))))
-            for j in range(w):
-                dense[offset + idx + j] = 1
+            dense[offset + idx : offset + idx + w] = 1
             offset += bits
 
         # ── Block 1c: dist stats (features 14-20) ────────────────────────────
@@ -171,8 +169,7 @@ class CombinedEncoder:
             val = float(np.clip(stats_features[i], self.min_vals[i], self.max_vals[i]))
             pos = (val - self.min_vals[i]) / self._ranges[i]
             idx = max(0, min(bits - w, int(pos * (bits - w))))
-            for j in range(w):
-                dense[offset + idx + j] = 1
+            dense[offset + idx : offset + idx + w] = 1
             offset += bits
 
         # ── Block 2: key one-hot (95 bits, exactly 1 active) ─────────────────
