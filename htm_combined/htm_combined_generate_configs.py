@@ -241,7 +241,7 @@ def write_prepare_windows_slurm_script(out_path: str = "slurm/hc_prepare_windows
 #SBATCH --array=0-7
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --time=08:00:00
+#SBATCH --time=24:00:00
 ##SBATCH --partition=<partition>
 ##SBATCH --account=<account>
 
