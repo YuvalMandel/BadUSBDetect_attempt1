@@ -106,6 +106,7 @@ source /path/to/.venv/bin/activate
     ├── submit_array.sh        Generated HTM SLURM submission script
     ├── dist_submit_array.sh   Generated HTM-distance SLURM submission script
     ├── ds_submit_array.sh     Generated HTM-distance-stats SLURM submission script
+    ├── hc_prepare_windows.sh  Generated HTM-combined windows cache job (one-time)
     ├── hc_submit_array.sh     Generated HTM-combined SLURM submission script
     └── mlp_submit_array.sh    Generated MLP SLURM submission script
 ```
@@ -436,8 +437,13 @@ python htm_combined/htm_combined_generate_configs.py --n-configs 128 --seed 0
 ### Step 2.5 — Pre-compute windows cache (one-time, run once per data set)
 
 ```bash
+sbatch slurm/hc_prepare_windows.sh   # recommended: submit to SLURM
+# or interactively:
 python htm_combined/htm_combined_prepare_windows.py
 ```
+
+The script is generated automatically by `htm_combined_prepare_windows.py` on first run.
+It requests 4 CPUs, 32 GB RAM, and 8 hours — enough for all 8 window pairs.
 
 Computes KS/Wasserstein statistics for every `(window_size, window_step)` pair in the
 search space (8 pairs: `{5,10,15,20} × {1,2}`) across all train/val/test/bot files and
