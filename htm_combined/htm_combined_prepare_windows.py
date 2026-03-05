@@ -17,8 +17,9 @@ Per-config seeds only affect SP/TM initialisation, not the feature statistics,
 so the results remain comparable across configs.
 
 Usage (from project root):
-  python htm_combined/htm_combined_prepare_windows.py   # interactive
-  sbatch slurm/hc_prepare_windows.sh                    # SLURM batch
+  python htm_combined/htm_combined_prepare_windows.py   # interactive (all pairs)
+  python htm_combined/htm_combined_prepare_windows.py --task-id N  # single pair
+  sbatch slurm/hc_prepare_windows.sh                    # SLURM batch array
 
 Outputs:
   windows_cache/ws{N}s{S}.pkl  for each (window_size, window_step) pair
@@ -37,6 +38,7 @@ Cache file format (dict):
   }
 """
 
+import argparse
 import os
 import sys
 import pickle
@@ -84,11 +86,12 @@ def write_slurm_script(out_path: str = "slurm/hc_prepare_windows.sh"):
 #   sbatch slurm/hc_prepare_windows.sh
 # ============================================================
 #SBATCH --job-name=hc_prep_win
-#SBATCH --output=logs/hc_prepare_windows_%j.out
-#SBATCH --error=logs/hc_prepare_windows_%j.err
+#SBATCH --output=logs/hc_prepare_windows_%A_%a.out
+#SBATCH --error=logs/hc_prepare_windows_%A_%a.err
+#SBATCH --array=0-7
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
-#SBATCH --time=08:00:00
+#SBATCH --time=02:00:00
 ##SBATCH --partition=<partition>
 ##SBATCH --account=<account>
 
@@ -99,11 +102,12 @@ conda activate htm_keyboard_1
 # ---- Run --------------------------------------------------------
 echo "========================================"
 echo "Job   : $SLURM_JOB_ID"
+echo "Task  : $SLURM_ARRAY_TASK_ID"
 echo "Node  : $(hostname)"
 echo "Start : $(date)"
 echo "========================================"
 
-python htm_combined/htm_combined_prepare_windows.py
+python htm_combined/htm_combined_prepare_windows.py --task-id $SLURM_ARRAY_TASK_ID
 
 echo "========================================"
 echo "End   : $(date)"
@@ -116,6 +120,12 @@ echo "========================================"
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Pre-compute per-window feature sequences for HTM-Combined")
+    parser.add_argument("--task-id", type=int, default=None,
+                        help="SLURM array task ID (0-7) to process a single window pair")
+    args = parser.parse_args()
+
     os.makedirs(WINDOWS_DIR, exist_ok=True)
 
     # ── Load split + keystroke cache ──────────────────────────────────────────
@@ -160,8 +170,20 @@ def main():
           f"{len(split['val_bots'])} val-b / "
           f"{len(split['test_bots'])} test-b)")
 
+    # Determine which pairs to process
+    if args.task_id is not None:
+        if 0 <= args.task_id < len(WINDOW_PAIRS):
+            pairs_to_process = [WINDOW_PAIRS[args.task_id]]
+            print(f"Processing single pair index {args.task_id}: {pairs_to_process[0]}")
+        else:
+            print(f"ERROR: --task-id {args.task_id} is out of range [0, {len(WINDOW_PAIRS)-1}]")
+            sys.exit(1)
+    else:
+        pairs_to_process = WINDOW_PAIRS
+        print(f"Processing all {len(pairs_to_process)} pairs sequentially")
+
     # ── Build cache for each (window_size, window_step) pair ──────────────────
-    for window_size, window_step in WINDOW_PAIRS:
+    for window_size, window_step in pairs_to_process:
         out_path = os.path.join(WINDOWS_DIR,
                                 f"ws{window_size}s{window_step}.pkl")
 
