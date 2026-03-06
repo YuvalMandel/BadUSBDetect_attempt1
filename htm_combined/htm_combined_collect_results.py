@@ -99,9 +99,10 @@ def main():
               "Run htm_combined_train_single.py jobs first.")
         sys.exit(0)
 
-    # Sort by test F1 first, then val BAcc as tiebreaker
+    # Sort by test F1 first, then val BAcc, then config_idx (newer = higher = better)
     records.sort(
-        key=lambda r: (r.get("test_f1", 0), r.get("val_bacc", r.get("val_f1", 0))),
+        key=lambda r: (r.get("test_f1", 0), r.get("val_bacc", r.get("val_f1", 0)),
+                       r.get("config_idx", 0)),
         reverse=True)
 
     total = len(records)

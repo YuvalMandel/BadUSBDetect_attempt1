@@ -2,8 +2,9 @@
 htm_combined/htm_combined_generate_configs.py
 Generate random HTM-Combined hyperparameter configs and a SLURM script.
 
-Search space refined from round-2 results (122 runs, best test F1 = 0.9189):
-  Best: hc0036 — sp=30 pct=0.8, se=32w5, ke=8w5, ws=5s1, tm=16, act=10, wu=2, al=15
+Search space refined from round-3 results (~400 runs, best test F1 = 0.9189):
+  Best (Round 3): hc0324 — sp=35 pct=0.8, d24w5/f16w9/q24w7, dk8w3/fk16w7/qk8w7,
+                            ws=10s1, tm=32, act=10, wu=2, al=15
 
 New in Round 3: ALL 24 scalar-encoded parameters have independent enc_bits/enc_w:
   - 3 stats channels × (enc_bits, enc_w):
@@ -15,13 +16,13 @@ New in Round 3: ALL 24 scalar-encoded parameters have independent enc_bits/enc_w
       flight_scalar_enc_bits/ flight_scalar_enc_w (last-key flight time, 0-500 ms)
       dist_scalar_enc_bits  / dist_scalar_enc_w   (last-key QWERTY dist, 0-12 u)
 
-Round-2 analysis (top-20 configs):
-  scalar_enc_bits: 8 → 75%, 24 → 20%, 16 → 5%  →  narrow to [8, 16]
-  scalar_enc_w:    7 → 65%, 5 → 20%, 3 → 15%
-  stats_enc_bits:  evenly spread across 16/24/32
-  stats_enc_w:     7 → 50%, 5 → 25%, 9 → 25%
-  window_step=1 preferred (65%); al_period=10 most common
-  tm_maxNewSynapseCount=30 dominant; tm_minThreshold=8 preferred
+Round-3 analysis (top-14 configs all at test F1 = 0.9189):
+  window_step=1 always (step=2 never in top results)   → drop window_step=2
+  window_size=20 only once in top-14                   → drop window_size=20
+  scalar_enc_bits: 8 dominates; 16 appears for flight/dist scalars → keep [8, 16]
+  stats enc_bits/w: 16/24/32 and 5/7/9 all competitive → keep as is
+  warmup=2 and warmup=3 both competitive               → keep [2, 3]
+  al_period: 5/10/15 all appear in top-14             → keep all three
 
 Cumulative workflow — results are never deleted:
   Each run finds the highest config_idx in hc_results/, deletes old
@@ -78,44 +79,44 @@ PARAM_SPACE = {
     "flight_scalar_enc_w":     [3, 5, 7],
     "dist_scalar_enc_bits":    [8, 16],
     "dist_scalar_enc_w":       [3, 5, 7],
-    # Window
-    "window_size":             [5, 10, 15, 20],
-    "window_step":             [1, 2],
+    # Window — step=2 and size=20 never appear in Round-3 top results
+    "window_size":             [5, 10, 15],
+    "window_step":             [1],
     # Detection — warmup=0/1 produced degenerate configs; focus on 2-3
     "warmup_steps":            [2, 3],
     "al_period":               [5, 10, 15],
 }
 
-# Default: anchored on Round-2 winner hc0036
-# (sp=30 pct=0.8, se=32w5, ke=8w5, ws=5s1, tm=16, act=10, wu=2, al=15)
+# Default: anchored on Round-3 winner hc0324
+# (sp=35 pct=0.8, d24w5/f16w9/q24w7, dk8w3/fk16w7/qk8w7, ws=10s1, tm=32, act=10, wu=2, al=15)
 DEFAULT_CONFIG = {
     "sp_columnDimensions":    2048,
-    "sp_numActiveColumns":    30,
+    "sp_numActiveColumns":    35,
     "sp_potentialPct":        0.80,
     "sp_synPermActiveInc":    0.05,
-    "sp_synPermConnected":    0.20,
-    "sp_synPermInactiveDec":  0.010,
-    "tm_cellsPerColumn":      16,
+    "sp_synPermConnected":    0.10,
+    "sp_synPermInactiveDec":  0.005,
+    "tm_cellsPerColumn":      32,
     "tm_activationThreshold": 10,
-    "tm_initialPermanence":   0.31,
+    "tm_initialPermanence":   0.40,
     "tm_connectedPermanence": 0.30,
     "tm_minThreshold":        8,
-    "tm_maxNewSynapseCount":  30,
+    "tm_maxNewSynapseCount":  20,
     "tm_permanenceIncrement": 0.05,
-    "tm_permanenceDecrement": 0.05,
-    "dwell_stats_enc_bits":   32,
+    "tm_permanenceDecrement": 0.10,
+    "dwell_stats_enc_bits":   24,
     "dwell_stats_enc_w":      5,
-    "flight_stats_enc_bits":  32,
-    "flight_stats_enc_w":     5,
-    "dist_stats_enc_bits":    32,
-    "dist_stats_enc_w":       5,
+    "flight_stats_enc_bits":  16,
+    "flight_stats_enc_w":     9,
+    "dist_stats_enc_bits":    24,
+    "dist_stats_enc_w":       7,
     "dwell_scalar_enc_bits":  8,
-    "dwell_scalar_enc_w":     5,
-    "flight_scalar_enc_bits": 8,
-    "flight_scalar_enc_w":    5,
+    "dwell_scalar_enc_w":     3,
+    "flight_scalar_enc_bits": 16,
+    "flight_scalar_enc_w":    7,
     "dist_scalar_enc_bits":   8,
-    "dist_scalar_enc_w":      5,
-    "window_size":            5,
+    "dist_scalar_enc_w":      7,
+    "window_size":            10,
     "window_step":            1,
     "warmup_steps":           2,
     "al_period":              15,
@@ -238,7 +239,7 @@ def write_prepare_windows_slurm_script(out_path: str = "slurm/hc_prepare_windows
 #SBATCH --job-name=hc_prep_win
 #SBATCH --output=logs/hc_prepare_windows_%A_%a.out
 #SBATCH --error=logs/hc_prepare_windows_%A_%a.err
-#SBATCH --array=0-7
+#SBATCH --array=0-2
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=24:00:00

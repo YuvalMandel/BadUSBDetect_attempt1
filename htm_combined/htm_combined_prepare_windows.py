@@ -8,9 +8,9 @@ Instead of recomputing KS/Wasserstein statistics inside every SLURM job
 (128 configs × ~500 files each), statistics are computed once per
 (window_size, window_step) pair and shared by all configs with those settings.
 
-The 8 pairs in the Round-3 search space:
-  window_size  ∈ {5, 10, 15, 20}
-  window_step  ∈ {1, 2}
+The 3 pairs in the Round-4 search space:
+  window_size  ∈ {5, 10, 15}
+  window_step  ∈ {1}
 
 A fixed reference pool is built with RANDOM_SEED (not per-config seed).
 Per-config seeds only affect SP/TM initialisation, not the feature statistics,
@@ -64,11 +64,12 @@ CACHE_FILE  = "stats_cache.pkl"
 DIST_CACHE  = "dist_cache.pkl"      # fallback — same format
 WINDOWS_DIR = "windows_cache"
 
-# All (window_size, window_step) pairs in the Round-3 search space
+# All (window_size, window_step) pairs in the Round-4 search space
+# (window_step=2 and window_size=20 dropped after Round-3 analysis)
 WINDOW_PAIRS = [
     (ws, st)
-    for ws in [5, 10, 15, 20]
-    for st in [1, 2]
+    for ws in [5, 10, 15]
+    for st in [1]
 ]
 
 
@@ -88,7 +89,7 @@ def write_slurm_script(out_path: str = "slurm/hc_prepare_windows.sh"):
 #SBATCH --job-name=hc_prep_win
 #SBATCH --output=logs/hc_prepare_windows_%A_%a.out
 #SBATCH --error=logs/hc_prepare_windows_%A_%a.err
-#SBATCH --array=0-7
+#SBATCH --array=0-2
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --time=02:00:00
