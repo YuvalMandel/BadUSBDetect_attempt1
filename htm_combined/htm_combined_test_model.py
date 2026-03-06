@@ -54,8 +54,7 @@ except ImportError:
 
 from htm_combined_common import (
     apply_detection, get_file_combined_seq,
-    make_anomaly_likelihood, WARMUP_STEPS,
-    parse_file_distance,
+    WARMUP_STEPS, parse_file_distance,
 )
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -91,10 +90,15 @@ def get_scores(file_list, is_bot, model_data, seqs_dict, warmup, al_period):
     Run SP+TM+AL on each file.
     seqs_dict maps filepath → [(stats_21, key_idx, dwell, flight, dist), …]
     Returns (mean_scores, labels, raw_seqs).
+
+    Uses the trained AL from the model pkl (NOT reset between files) to match
+    the evaluation behaviour in htm_combined_train_single.py exactly.
+    TM is reset per file (no temporal context across files).
     """
     sp          = model_data['sp']
     tm          = model_data['tm']
     encoder     = model_data['encoder']
+    al          = model_data['al']          # trained AL — shared, never reset
     input_width = model_data['input_width']
     active_columns = SDR(sp.getColumnDimensions())
 
@@ -103,8 +107,7 @@ def get_scores(file_list, is_bot, model_data, seqs_dict, warmup, al_period):
         seq = seqs_dict.get(fp)
         if not seq:
             continue
-        al = make_anomaly_likelihood(al_period)
-        tm.reset()
+        tm.reset()                          # TM reset per file, AL is not
         raw = []
         for stats, key_idx, dwell, flight, dist in seq:
             enc_sdr       = SDR(input_width)
@@ -129,11 +132,11 @@ def write_decision_log(filepath, seq, model_data, true_label, out_path,
     sp          = model_data['sp']
     tm          = model_data['tm']
     encoder     = model_data['encoder']
+    al          = model_data['al']          # trained AL, consistent with get_scores
     input_width = model_data['input_width']
     best_thresh = model_data['best_thresh']
     active_columns = SDR(sp.getColumnDimensions())
 
-    al = make_anomaly_likelihood(al_period)
     tm.reset()
     rows = []
     bot_triggered_at = None
