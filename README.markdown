@@ -64,7 +64,8 @@ source /path/to/.venv/bin/activate
 │   ├── htm_combined_train_single.py      SLURM worker — train one HTM-combined config
 │   ├── htm_combined_generate_configs.py  Generate hc_configs/ + slurm/hc_submit_array.sh
 │   ├── htm_combined_prepare_windows.py   One-time cache of per-window stats → windows_cache/
-│   └── htm_combined_collect_results.py   Aggregate hc_results/  →  leaderboard
+│   ├── htm_combined_collect_results.py   Aggregate hc_results/  →  leaderboard
+│   └── htm_combined_test_model.py        Test a saved model (3 evaluation modes)
 │
 ├── mlp/
 │   ├── mlp_prepare_data.py    Parse raw files → train/val/test CSV + reference pool
@@ -442,11 +443,11 @@ sbatch slurm/hc_prepare_windows.sh   # recommended: submit to SLURM
 python htm_combined/htm_combined_prepare_windows.py
 ```
 
-The script is generated automatically by `htm_combined_prepare_windows.py` on first run.
-It requests 4 CPUs, 32 GB RAM, and 8 hours — enough for all 8 window pairs.
+The script is generated automatically by `htm_combined/htm_combined_generate_configs.py`.
+It requests 4 CPUs, 32 GB RAM, and 2 hours — enough for all 3 window pairs.
 
 Computes KS/Wasserstein statistics for every `(window_size, window_step)` pair in the
-search space (8 pairs: `{5,10,15,20} × {1,2}`) across all train/val/test/bot files and
+search space (3 pairs: `{5,10,15} × {1}`) across all train/val/test/bot files and
 saves them to `windows_cache/ws{N}s{S}.pkl`.
 
 **Why:** KS/Wasserstein statistics are O(N × num_references) per window per file.
@@ -480,6 +481,79 @@ Reads all `hc_results/hc*.json` (all rounds), prints ranked leaderboard, writes
 > The leaderboard script handles all config generations automatically:
 > Round 1 (shared `enc_bits_per_feature`), Round 2 (split `stats_enc_bits`/`scalar_enc_bits`),
 > Round 3 (per-channel `dwell_stats_enc_bits` etc.) all display correctly.
+>
+> Ties are broken by `config_idx` descending — newer (higher-index) configs rank first.
+
+### Step 5 — Test a saved model
+
+```bash
+python htm_combined/htm_combined_test_model.py \
+    --model hc_models/<slug>.pkl \
+    --mode all_non_train
+```
+
+#### Evaluation modes (`--mode`)
+
+| Mode | Description |
+|------|-------------|
+| `orig` | Val and test splits from `split.pkl` (same files used during training) |
+| `all_non_train` | All files in split.pkl that were not in the training set (default) |
+| `all_other_files` | Walk `--data_root` for new human `.txt` files + `--bots_root` for bot files; parsed on-the-fly using the ref pool stored in the model pkl |
+
+#### Additional flags
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `--data_root` | `../UB_keystroke_dataset/` | Human files root for `all_other_files` mode |
+| `--bots_root` | `../BadUSBdataset` | Bot files root for `all_other_files` mode |
+| `--write_decision_log` | off | Write a per-window decision log for one human + one bot file |
+
+#### Running on Newton SLURM (multi-CPU for all_other_files)
+
+Create `slurm/hc_test_model.sh` (edit `MODEL=` and `MODE=` before submitting):
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=hc_test
+#SBATCH --output=logs/hc_test_%j.out
+#SBATCH --error=logs/hc_test_%j.err
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=32G
+#SBATCH --time=02:00:00
+##SBATCH --partition=<partition>
+##SBATCH --account=<account>
+
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate htm_keyboard_1
+
+MODEL="hc_models/<slug>.pkl"
+MODE="all_other_files"   # orig | all_non_train | all_other_files
+
+python -u htm_combined/htm_combined_test_model.py \
+    --model "$MODEL" \
+    --mode  "$MODE"
+```
+
+```bash
+sbatch slurm/hc_test_model.sh
+```
+
+The script uses `SLURM_CPUS_PER_TASK` workers automatically for parallel feature extraction
+(relevant for `all_other_files` mode). For `orig` and `all_non_train` modes a single CPU is sufficient.
+
+#### Decision log (`--write_decision_log`)
+
+Written to `logs/<slug>_human_log.txt` and `logs/<slug>_bot_log.txt`.
+One row per window step:
+
+```
+  Window     Score          Status  Reason
+--------  --------  --------------  ---------------------------------------------------
+       0    0.0000          WARMUP  warmup period (1/2)
+       2    0.0218      no crossing  score 0.0218 < threshold 0.0279
+       3    0.9412             BOT  first crossing: 0.9412 >= threshold 0.0279
+       4    0.9412             BOT  already triggered at window 3
+```
 
 ### Clean for a fully fresh start (discard all results)
 
