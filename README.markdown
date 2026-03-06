@@ -510,36 +510,22 @@ python htm_combined/htm_combined_test_model.py \
 
 #### Running on Newton SLURM (multi-CPU for all_other_files)
 
-Create `slurm/hc_test_model.sh` (edit `MODEL=` and `MODE=` before submitting):
-
-```bash
-#!/bin/bash
-#SBATCH --job-name=hc_test
-#SBATCH --output=logs/hc_test_%j.out
-#SBATCH --error=logs/hc_test_%j.err
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=32G
-#SBATCH --time=02:00:00
-##SBATCH --partition=<partition>
-##SBATCH --account=<account>
-
-source $(conda info --base)/etc/profile.d/conda.sh
-conda activate htm_keyboard_1
-
-MODEL="hc_models/<slug>.pkl"
-MODE="all_other_files"   # orig | all_non_train | all_other_files
-
-python -u htm_combined/htm_combined_test_model.py \
-    --model "$MODEL" \
-    --mode  "$MODE"
-```
+Edit `MODEL=` and `MODE=` at the top of `slurm/hc_test_model.sh`, then submit:
 
 ```bash
 sbatch slurm/hc_test_model.sh
 ```
 
-The script uses `SLURM_CPUS_PER_TASK` workers automatically for parallel feature extraction
-(relevant for `all_other_files` mode). For `orig` and `all_non_train` modes a single CPU is sufficient.
+Key settings in that script:
+```bash
+#SBATCH --cpus-per-task=128
+#SBATCH --mem=64G
+#SBATCH --time=02:00:00
+```
+
+The script automatically passes `SLURM_CPUS_PER_TASK=128` to Python, which uses that many
+worker processes for parallel feature extraction. Only relevant for `all_other_files` mode;
+`orig` and `all_non_train` read pre-computed caches and run single-threaded.
 
 #### Decision log (`--write_decision_log`)
 
