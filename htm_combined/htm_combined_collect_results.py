@@ -154,7 +154,8 @@ def main():
 
     csv_path = os.path.join(RESULTS_DIR, "leaderboard.csv")
     fieldnames = (
-        ["rank", "config_idx", "val_bacc", "val_f1", "test_f1", "best_thresh",
+        ["rank", "config_idx", "val_bacc", "val_f1", "test_f1",
+         "best_thresh", "live_thresh",
          "mean_bot_detect_step", "n_bots_caught", "n_bots_total",
          "mean_bot_score", "mean_human_score"]
         + all_cfg_keys
@@ -172,6 +173,7 @@ def main():
                 "val_f1":               r.get("val_f1", ""),
                 "test_f1":              r.get("test_f1", ""),
                 "best_thresh":          r.get("best_thresh", ""),
+                "live_thresh":          r.get("live_thresh", ""),
                 "mean_bot_detect_step": r.get("mean_bot_detect_step", ""),
                 "n_bots_caught":        r.get("n_bots_caught", ""),
                 "n_bots_total":         r.get("n_bots_total", ""),
