@@ -26,7 +26,7 @@ SCALER_GRU_PATH = os.path.join(_project_root, "rnn_scaler_params.npy")
 
 MODEL_HTM_PATH  = os.path.join(
     _project_root, "hc_models",
-    "hc0012_sp30_d24w5_f32w7_q24w5_dk16w5_fk8w3_qk16w7_ws5s1_tm16_act10_wu2_al5_vf10.6000_tf10.9189.pkl"
+    "hc0191_sp25_d16w9_f16w5_q24w7_dk16w5_fk16w5_qk8w7_ws10s1_tm16_act10_wu2_al5_vf10.7273_tf10.9189.pkl"
 )
 HTM_APP_WARMUP       = 5   # windows to skip before alarming (covers TM-reset spike)
 HTM_CALIB_SKIP_FIRST = 5   # skip first N warmup windows from adaptive calibration (TM reset spike)

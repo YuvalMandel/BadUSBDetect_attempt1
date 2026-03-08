@@ -19,15 +19,13 @@ New in Round 3: ALL 24 scalar-encoded parameters have independent enc_bits/enc_w
       flight_scalar_enc_bits/ flight_scalar_enc_w (last-key flight time, 0-500 ms)
       dist_scalar_enc_bits  / dist_scalar_enc_w   (last-key QWERTY dist, 0-12 u)
 
-Round-4 analysis (43/126 configs achieved live_thresh > 0):
+Full dataset analysis (117/254 configs deployable across all rounds):
   window_step=1 always                                 → keep [1]
-  window_size=5 dominates live_thresh>0 configs        → narrow to [5, 10]
-  al_period=15 associated with live_thresh=0 failures  → drop 15, keep [5, 10]
-  al_period=5 is the only value in hc0012 (live winner) → anchor default here
-  tm_cellsPerColumn: 16 in hc0012; 32 in Round-3 best  → keep [16, 32]
-  warmup=2 and warmup=3 both competitive               → keep [2, 3]
-  stats enc_bits/w: 16/24/32 and 5/7/9 all competitive → keep as is
-  scalar_enc_bits: 8 and 16 both appear               → keep [8, 16]
+  window_size: ws=15 is least efficient                → narrow to [5, 10]
+  al_period: al=15 is weakest; al=5→53, al=10→42 deployable → narrow to [5, 10]
+  Best test_f1=0.9444: hc0195 (ws=10, al=10, act=13) — not deployable
+  Best deployable: hc0191 (ws=10, al=5, val_bacc=0.9667) — Round-5 DEFAULT
+  Round-5 goal: find a config like hc0195 (test_f1=0.9444) that is also deployable
 
 Cumulative workflow — results are never deleted:
   Each run finds the highest config_idx in hc_results/, deletes old
@@ -93,37 +91,38 @@ PARAM_SPACE = {
     "al_period":               [5, 10],
 }
 
-# Default: anchored on Round-4 winner hc0012
-# (sp=30 pct=0.8, d24w5/f32w7/q24w5, dk16w5/fk8w3/qk16w7, ws=5s1, tm=16, act=10, min=10, wu=2, al=5)
-# hc0012 is the ONLY Round-4 config with test_f1=0.9189 AND live_thresh>0 (live_thresh=0.030)
+# Default: anchored on hc0191 — best deployable model across all 254 runs
+# (sp=25 pct=0.8, d16w9/f16w5/q24w7, dk16w5/fk16w5/qk8w7, ws=10s1, tm=16, act=10, min=10, wu=2, al=5)
+# hc0191: test_f1=0.9189, val_bacc=0.9667, live_thresh=0.0302
+# (hc0195 has higher test_f1=0.9444 but live_thresh=0 — target of Round 5 is a deployable version)
 DEFAULT_CONFIG = {
     "sp_columnDimensions":    2048,
-    "sp_numActiveColumns":    30,
+    "sp_numActiveColumns":    25,
     "sp_potentialPct":        0.80,
-    "sp_synPermActiveInc":    0.05,
-    "sp_synPermConnected":    0.10,
-    "sp_synPermInactiveDec":  0.005,
+    "sp_synPermActiveInc":    0.02,
+    "sp_synPermConnected":    0.20,
+    "sp_synPermInactiveDec":  0.003,
     "tm_cellsPerColumn":      16,
     "tm_activationThreshold": 10,
-    "tm_initialPermanence":   0.40,
+    "tm_initialPermanence":   0.21,
     "tm_connectedPermanence": 0.30,
     "tm_minThreshold":        10,
-    "tm_maxNewSynapseCount":  20,
-    "tm_permanenceIncrement": 0.05,
+    "tm_maxNewSynapseCount":  25,
+    "tm_permanenceIncrement": 0.10,
     "tm_permanenceDecrement": 0.10,
-    "dwell_stats_enc_bits":   24,
-    "dwell_stats_enc_w":      5,
-    "flight_stats_enc_bits":  32,
-    "flight_stats_enc_w":     7,
+    "dwell_stats_enc_bits":   16,
+    "dwell_stats_enc_w":      9,
+    "flight_stats_enc_bits":  16,
+    "flight_stats_enc_w":     5,
     "dist_stats_enc_bits":    24,
-    "dist_stats_enc_w":       5,
+    "dist_stats_enc_w":       7,
     "dwell_scalar_enc_bits":  16,
     "dwell_scalar_enc_w":     5,
-    "flight_scalar_enc_bits": 8,
-    "flight_scalar_enc_w":    3,
-    "dist_scalar_enc_bits":   16,
+    "flight_scalar_enc_bits": 16,
+    "flight_scalar_enc_w":    5,
+    "dist_scalar_enc_bits":   8,
     "dist_scalar_enc_w":      7,
-    "window_size":            5,
+    "window_size":            10,
     "window_step":            1,
     "warmup_steps":           2,
     "al_period":              5,
