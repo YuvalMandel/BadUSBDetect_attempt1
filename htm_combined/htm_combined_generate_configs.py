@@ -2,9 +2,12 @@
 htm_combined/htm_combined_generate_configs.py
 Generate random HTM-Combined hyperparameter configs and a SLURM script.
 
-Search space refined from round-3 results (~400 runs, best test F1 = 0.9189):
+Search space refined from round-4 results (126 runs, best test F1 = 0.9189):
   Best (Round 3): hc0324 — sp=35 pct=0.8, d24w5/f16w9/q24w7, dk8w3/fk16w7/qk8w7,
                             ws=10s1, tm=32, act=10, wu=2, al=15
+  Best (Round 4): hc0012 — sp=30 pct=0.8, d24w5/f32w7/q24w5, dk16w5/fk8w3/qk16w7,
+                            ws=5s1, tm=16, act=10, min=10, wu=2, al=5
+                  → Only config with test_f1=0.9189 AND live_thresh>0 (live_thresh=0.030)
 
 New in Round 3: ALL 24 scalar-encoded parameters have independent enc_bits/enc_w:
   - 3 stats channels × (enc_bits, enc_w):
@@ -16,13 +19,15 @@ New in Round 3: ALL 24 scalar-encoded parameters have independent enc_bits/enc_w
       flight_scalar_enc_bits/ flight_scalar_enc_w (last-key flight time, 0-500 ms)
       dist_scalar_enc_bits  / dist_scalar_enc_w   (last-key QWERTY dist, 0-12 u)
 
-Round-3 analysis (top-14 configs all at test F1 = 0.9189):
-  window_step=1 always (step=2 never in top results)   → drop window_step=2
-  window_size=20 only once in top-14                   → drop window_size=20
-  scalar_enc_bits: 8 dominates; 16 appears for flight/dist scalars → keep [8, 16]
-  stats enc_bits/w: 16/24/32 and 5/7/9 all competitive → keep as is
+Round-4 analysis (43/126 configs achieved live_thresh > 0):
+  window_step=1 always                                 → keep [1]
+  window_size=5 dominates live_thresh>0 configs        → narrow to [5, 10]
+  al_period=15 associated with live_thresh=0 failures  → drop 15, keep [5, 10]
+  al_period=5 is the only value in hc0012 (live winner) → anchor default here
+  tm_cellsPerColumn: 16 in hc0012; 32 in Round-3 best  → keep [16, 32]
   warmup=2 and warmup=3 both competitive               → keep [2, 3]
-  al_period: 5/10/15 all appear in top-14             → keep all three
+  stats enc_bits/w: 16/24/32 and 5/7/9 all competitive → keep as is
+  scalar_enc_bits: 8 and 16 both appear               → keep [8, 16]
 
 Cumulative workflow — results are never deleted:
   Each run finds the highest config_idx in hc_results/, deletes old
@@ -44,7 +49,7 @@ import random
 from pathlib import Path
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Search space (Round 3)
+# Search space (Round 5 — anchored on hc0012, al_period=[5,10], ws=[5,10])
 # ──────────────────────────────────────────────────────────────────────────────
 PARAM_SPACE = {
     # SpatialPooler
@@ -79,47 +84,49 @@ PARAM_SPACE = {
     "flight_scalar_enc_w":     [3, 5, 7],
     "dist_scalar_enc_bits":    [8, 16],
     "dist_scalar_enc_w":       [3, 5, 7],
-    # Window — step=2 and size=20 never appear in Round-3 top results
-    "window_size":             [5, 10, 15],
+    # Window — ws=5 dominates live_thresh>0 configs; ws=15 dropped
+    "window_size":             [5, 10],
     "window_step":             [1],
     # Detection — warmup=0/1 produced degenerate configs; focus on 2-3
     "warmup_steps":            [2, 3],
-    "al_period":               [5, 10, 15],
+    # al_period=15 correlates with live_thresh=0; use only [5, 10]
+    "al_period":               [5, 10],
 }
 
-# Default: anchored on Round-3 winner hc0324
-# (sp=35 pct=0.8, d24w5/f16w9/q24w7, dk8w3/fk16w7/qk8w7, ws=10s1, tm=32, act=10, wu=2, al=15)
+# Default: anchored on Round-4 winner hc0012
+# (sp=30 pct=0.8, d24w5/f32w7/q24w5, dk16w5/fk8w3/qk16w7, ws=5s1, tm=16, act=10, min=10, wu=2, al=5)
+# hc0012 is the ONLY Round-4 config with test_f1=0.9189 AND live_thresh>0 (live_thresh=0.030)
 DEFAULT_CONFIG = {
     "sp_columnDimensions":    2048,
-    "sp_numActiveColumns":    35,
+    "sp_numActiveColumns":    30,
     "sp_potentialPct":        0.80,
     "sp_synPermActiveInc":    0.05,
     "sp_synPermConnected":    0.10,
     "sp_synPermInactiveDec":  0.005,
-    "tm_cellsPerColumn":      32,
+    "tm_cellsPerColumn":      16,
     "tm_activationThreshold": 10,
     "tm_initialPermanence":   0.40,
     "tm_connectedPermanence": 0.30,
-    "tm_minThreshold":        8,
+    "tm_minThreshold":        10,
     "tm_maxNewSynapseCount":  20,
     "tm_permanenceIncrement": 0.05,
     "tm_permanenceDecrement": 0.10,
     "dwell_stats_enc_bits":   24,
     "dwell_stats_enc_w":      5,
-    "flight_stats_enc_bits":  16,
-    "flight_stats_enc_w":     9,
+    "flight_stats_enc_bits":  32,
+    "flight_stats_enc_w":     7,
     "dist_stats_enc_bits":    24,
-    "dist_stats_enc_w":       7,
-    "dwell_scalar_enc_bits":  8,
-    "dwell_scalar_enc_w":     3,
-    "flight_scalar_enc_bits": 16,
-    "flight_scalar_enc_w":    7,
-    "dist_scalar_enc_bits":   8,
+    "dist_stats_enc_w":       5,
+    "dwell_scalar_enc_bits":  16,
+    "dwell_scalar_enc_w":     5,
+    "flight_scalar_enc_bits": 8,
+    "flight_scalar_enc_w":    3,
+    "dist_scalar_enc_bits":   16,
     "dist_scalar_enc_w":      7,
-    "window_size":            10,
+    "window_size":            5,
     "window_step":            1,
     "warmup_steps":           2,
-    "al_period":              15,
+    "al_period":              5,
     "seed":                   42,
 }
 

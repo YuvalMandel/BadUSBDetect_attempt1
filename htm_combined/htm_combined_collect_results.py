@@ -72,6 +72,8 @@ def format_row(rank: int, r: dict) -> str:
     )
     val_bacc = r.get("val_bacc", float("nan"))
     bacc_str = f"{val_bacc:.4f}" if val_bacc == val_bacc else "  N/A "
+    live_thresh = r.get("live_thresh", None)
+    lt_str = f"{live_thresh:.4f}" if live_thresh is not None and live_thresh > 0 else "  ---  "
     return (
         f"{rank:>4}  "
         f"hc{r.get('config_idx', 0):04d}  "
@@ -79,6 +81,7 @@ def format_row(rank: int, r: dict) -> str:
         f"{r.get('val_f1', 0):.4f}   "
         f"{r.get('test_f1', 0):.4f}   "
         f"{r.get('best_thresh', 0):.4f}  "
+        f"lt={lt_str}  "
         f"det={det_str}  "
         f"caught={caught}/{total}  "
         f"bSc={b_sc:.3f}  hSc={h_sc:.3f}  "
@@ -99,28 +102,34 @@ def main():
               "Run htm_combined_train_single.py jobs first.")
         sys.exit(0)
 
-    # Sort by test F1 first, then val BAcc, then config_idx (newer = higher = better)
+    # Sort: test F1 first, then live_thresh>0 (deployable models first),
+    # then val BAcc, then config_idx (newer = higher = better)
     records.sort(
-        key=lambda r: (r.get("test_f1", 0), r.get("val_bacc", r.get("val_f1", 0)),
+        key=lambda r: (r.get("test_f1", 0),
+                       1 if r.get("live_thresh", 0) > 0 else 0,
+                       r.get("val_bacc", r.get("val_f1", 0)),
                        r.get("config_idx", 0)),
         reverse=True)
 
     total = len(records)
     show  = min(args.top, total)
 
-    sep    = "=" * 152
+    sep    = "=" * 165
     header = (f"{'Rank':>4}  {'Config':>8}  {'ValBAcc':>7}  {'Val F1':>7}   "
               f"{'Test F1':>7}   {'Thresh':>7}  "
+              f"{'LiveThresh':>10}  "
               f"{'DetStep':>9}  {'Caught':>10}  "
               f"{'bSc':>7}  {'hSc':>7}  Key params")
     lines  = [sep,
               f"  HTM-Combined Hyperparameter Search -- {total} completed runs",
-              sep, header, "-" * 152]
+              sep, header, "-" * 165]
 
     for rank, r in enumerate(records[:show], 1):
         lines.append(format_row(rank, r))
 
     best = records[0]
+    best_lt = best.get('live_thresh', None)
+    best_lt_str = f"{best_lt:.4f}" if best_lt is not None and best_lt > 0 else "N/A (model not deployable)"
     lines += [
         sep,
         f"  Best config : hc_configs/config_{best.get('config_idx', 0):04d}.json",
@@ -128,6 +137,7 @@ def main():
         f"  Best val BAcc: {best.get('val_bacc', float('nan')):.4f}",
         f"  Best val F1 : {best.get('val_f1', 0):.4f}",
         f"  Best test F1: {best.get('test_f1', 0):.4f}",
+        f"  Live thresh : {best_lt_str}",
         f"  Mean det window: {best.get('mean_bot_detect_step', -1):.1f}  "
         f"({best.get('n_bots_caught','?')}/{best.get('n_bots_total','?')} bots caught)",
         f"  Mean bot score  (post-warmup): {best.get('mean_bot_score', 0):.4f}",
