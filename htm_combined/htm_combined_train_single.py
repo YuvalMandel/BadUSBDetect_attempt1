@@ -432,9 +432,23 @@ def main():
             tm.compute(active_columns, learn=True)
             al.compute(float(tm.anomaly))   # train AL on human distribution
 
-    # Freeze AL state right after training — before any evaluation modifies it.
-    # This is the exact state that the live app will start from.
-    al_live_bytes = pickle.dumps(al)
+    # Build a clean live-mode AL by replaying training files with learn=False.
+    # During learn=True training, early windows have high raw anomaly (TM still
+    # learning), which widens the AL distribution and makes bot raw values look
+    # unremarkable.  With learn=False on the fully-trained TM, all training
+    # windows produce raw≈0, giving a tight human-only distribution where any
+    # bot raw>0 will look genuinely anomalous.
+    al_live = make_anomaly_likelihood(al_period)
+    for fp in tqdm(shuffled_train, desc=f"Calibrate live AL hc{config_idx:04d}"):
+        seq = train_seqs[fp]
+        tm.reset()
+        for stats, key_idx, dwell, flight, dist in seq:
+            enc_sdr       = SDR(input_width)
+            enc_sdr.dense = encoder.encode(stats, key_idx, dwell, flight, dist)
+            sp.compute(enc_sdr, False, active_columns)
+            tm.compute(active_columns, learn=False)
+            al_live.compute(float(tm.anomaly))
+    al_live_bytes = pickle.dumps(al_live)
 
     # ── Evaluation helper ─────────────────────────────────────────
     def _get_seq(fp):
