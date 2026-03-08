@@ -26,7 +26,7 @@ SCALER_GRU_PATH = os.path.join(_project_root, "rnn_scaler_params.npy")
 
 MODEL_HTM_PATH  = os.path.join(
     _project_root, "hc_models",
-    "hc0499_sp35_d16w7_f24w5_q24w9_dk16w7_fk8w7_qk8w7_ws10s1_tm16_act13_wu2_al15_vf10.8571_tf10.9189.pkl"
+    "hc0012_sp30_d24w5_f32w7_q24w5_dk16w5_fk8w3_qk16w7_ws5s1_tm16_act10_wu2_al5_vf10.6000_tf10.9189.pkl"
 )
 HTM_APP_WARMUP       = 5   # windows to skip before alarming (covers TM-reset spike)
 HTM_CALIB_SKIP_FIRST = 5   # skip first N warmup windows from adaptive calibration (TM reset spike)
@@ -255,6 +255,11 @@ def processing_thread():
                 htm_effective_thresh = None
                 if htm_model_data is not None:
                     htm_tm.reset()
+                    # Restore AL to the clean calibrated state so live_thresh
+                    # remains valid and bot-session history doesn't carry over.
+                    global htm_al
+                    if 'al_live_bytes' in htm_model_data:
+                        htm_al = pickle.loads(htm_model_data['al_live_bytes'])
                 while not raw_events_queue.empty():
                     raw_events_queue.get()
 
