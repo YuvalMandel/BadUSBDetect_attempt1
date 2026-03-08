@@ -432,20 +432,25 @@ def main():
             tm.compute(active_columns, learn=True)
             al.compute(float(tm.anomaly))   # train AL on human distribution
 
+    # Freeze AL state right after training — before any evaluation modifies it.
+    # This is the exact state that the live app will start from.
+    al_live_bytes = pickle.dumps(al)
+
     # ── Evaluation helper ─────────────────────────────────────────
+    def _get_seq(fp):
+        if wcache is not None:
+            return wcache['sequences'].get(fp)
+        events = cache.get(fp)
+        if not events:
+            return None
+        return get_file_combined_seq(events, window_size, window_step,
+                                     ref_dwells, ref_flights, ref_dists)
+
     def get_scores(file_list, is_bot):
-        """Run SP+TM+AL on each file.  Returns (mean_scores, labels, score_seqs)."""
+        """Shared AL across files (original eval mode). Returns (mean_scores, labels, score_seqs)."""
         scores, labels, seqs = [], [], []
         for fp in file_list:
-            # Prefer pre-loaded windows cache; fall back to on-the-fly
-            if wcache is not None:
-                seq = wcache['sequences'].get(fp)
-            else:
-                events = cache.get(fp)
-                if not events:
-                    continue
-                seq = get_file_combined_seq(events, window_size, window_step,
-                                            ref_dwells, ref_flights, ref_dists)
+            seq = _get_seq(fp)
             if not seq:
                 continue
             tm.reset()
@@ -456,6 +461,31 @@ def main():
                 sp.compute(enc_sdr, False, active_columns)
                 tm.compute(active_columns, learn=False)
                 raw.append(al.compute(float(tm.anomaly)))
+
+            label = 1 if is_bot else 0
+            valid = raw[warmup:]
+            scores.append(float(np.mean(valid)) if valid else 0.0)
+            labels.append(label)
+            seqs.append(raw)
+        return scores, labels, seqs
+
+    def get_scores_live(file_list, is_bot):
+        """Independent fresh AL copy per file — mirrors live app deployment.
+        No file can influence another's AL starting state."""
+        scores, labels, seqs = [], [], []
+        for fp in file_list:
+            seq = _get_seq(fp)
+            if not seq:
+                continue
+            al_fresh = pickle.loads(al_live_bytes)  # same starting state as live app
+            tm.reset()
+            raw = []
+            for stats, key_idx, dwell, flight, dist in seq:
+                enc_sdr       = SDR(input_width)
+                enc_sdr.dense = encoder.encode(stats, key_idx, dwell, flight, dist)
+                sp.compute(enc_sdr, False, active_columns)
+                tm.compute(active_columns, learn=False)
+                raw.append(al_fresh.compute(float(tm.anomaly)))
 
             label = 1 if is_bot else 0
             valid = raw[warmup:]
@@ -496,6 +526,38 @@ def main():
                        apply_detection(all_val_seqs, 'first_crossing',
                                        best_thresh, warmup, labels=all_val_labels),
                        zero_division=0)
+
+    # ── Live-mode threshold: per-file independent AL (matches live app) ────────
+    # Each file starts from the same frozen post-training AL state, so no
+    # BadUSB input can influence the threshold that is saved into the model.
+    print("Computing live-mode threshold (per-file independent AL)...")
+    lv_h_sc, lv_h_lb, lv_h_sq = get_scores_live(val_human, False)
+    lv_b_sc, lv_b_lb, lv_b_sq = get_scores_live(val_bots,  True)
+    lv_val_seqs   = lv_h_sq + lv_b_sq
+    lv_val_labels = lv_h_lb + lv_b_lb
+
+    live_bacc, live_thresh = 0.0, 0.0
+    for th in coarse_pts:
+        preds = apply_detection(lv_val_seqs, 'first_crossing', th, warmup,
+                                labels=lv_val_labels)
+        bacc = balanced_accuracy_score(lv_val_labels, preds)
+        if bacc > live_bacc:
+            live_bacc, live_thresh = bacc, th
+
+    fine_lo = max(0.0, live_thresh - 2 * coarse_step)
+    fine_hi = min(1.0, live_thresh + 2 * coarse_step)
+    for th in np.linspace(fine_lo, fine_hi, 1000):
+        preds = apply_detection(lv_val_seqs, 'first_crossing', th, warmup,
+                                labels=lv_val_labels)
+        bacc = balanced_accuracy_score(lv_val_labels, preds)
+        if bacc > live_bacc:
+            live_bacc, live_thresh = bacc, th
+
+    live_f1 = f1_score(lv_val_labels,
+                       apply_detection(lv_val_seqs, 'first_crossing',
+                                       live_thresh, warmup, labels=lv_val_labels),
+                       zero_division=0)
+    print(f"  Live thresh = {live_thresh:.4f}  (BAcc={live_bacc:.4f}  F1={live_f1:.4f})")
 
     # ── Test ──────────────────────────────────────────────────────
     print("Testing...")
@@ -565,8 +627,10 @@ def main():
             "tm":             tm,
             "encoder":        encoder,
             "al":             al,
+            "al_live_bytes":  al_live_bytes,   # post-training AL state for live app
             "input_width":    input_width,
-            "best_thresh":    best_thresh,
+            "best_thresh":    best_thresh,     # shared-AL eval threshold (offline use)
+            "live_thresh":    live_thresh,     # per-file AL threshold (live app use)
             "detection_mode": "first_crossing",
             "warmup_steps":   warmup,
             "al_period":      al_period,
@@ -591,6 +655,7 @@ def main():
         "val_f1":                float(best_f1),
         "test_f1":               float(test_f1),
         "best_thresh":           float(best_thresh),
+        "live_thresh":           float(live_thresh),
         "mean_bot_detect_step":  mean_detect,
         "n_bots_caught":         n_caught,
         "n_bots_total":          n_bots,

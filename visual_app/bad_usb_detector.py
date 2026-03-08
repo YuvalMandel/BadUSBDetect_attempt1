@@ -28,7 +28,8 @@ MODEL_HTM_PATH  = os.path.join(
     _project_root, "hc_models",
     "hc0499_sp35_d16w7_f24w5_q24w9_dk16w7_fk8w7_qk8w7_ws10s1_tm16_act13_wu2_al15_vf10.8571_tf10.9189.pkl"
 )
-HTM_APP_WARMUP = 30  # windows to skip before alarming (overrides model's warmup_steps=2)
+HTM_APP_WARMUP       = 5   # windows to skip before alarming (covers TM-reset spike)
+HTM_CALIB_SKIP_FIRST = 5   # skip first N warmup windows from adaptive calibration (TM reset spike)
 HTM_DEBUG      = True  # print per-window anomaly details for HTM
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -132,7 +133,8 @@ htm_window_size     = 10
 htm_ref_dwells      = None
 htm_ref_flights     = None
 htm_ref_dists       = None
-htm_active_cols_sdr = None
+htm_active_cols_sdr  = None
+htm_has_live_thresh  = False   # True when model has a properly calibrated live_thresh
 
 if _htm_available:
     try:
@@ -141,16 +143,33 @@ if _htm_available:
         htm_sp          = htm_model_data['sp']
         htm_tm          = htm_model_data['tm']
         htm_encoder     = htm_model_data['encoder']
-        htm_al          = htm_model_data['al']
         htm_input_width = htm_model_data['input_width']
-        htm_best_thresh = htm_model_data['best_thresh']
         htm_warmup      = htm_model_data.get('warmup_steps', 2)
         htm_window_size = htm_model_data.get('window_size', 10)
         htm_ref_dwells  = htm_model_data['ref_dwells']
         htm_ref_flights = htm_model_data['ref_flights']
         htm_ref_dists   = htm_model_data['ref_dists']
         htm_active_cols_sdr = _SDR(htm_sp.getColumnDimensions())
-        print(f"✅ HTM model loaded  (window={htm_window_size}, thresh={htm_best_thresh:.3f})")
+
+        # Prefer live_thresh (calibrated in per-file mode matching live deployment).
+        # Fall back to best_thresh (calibrated in shared-AL mode) + adaptive.
+        htm_has_live_thresh = 'live_thresh' in htm_model_data
+        htm_best_thresh = htm_model_data.get('live_thresh',
+                                             htm_model_data['best_thresh'])
+        _thresh_source = 'live' if htm_has_live_thresh else 'shared-AL (adaptive fallback)'
+
+        # Restore AL from post-training frozen state if available;
+        # otherwise fall back to the post-evaluation state.
+        if 'al_live_bytes' in htm_model_data:
+            htm_al = pickle.loads(htm_model_data['al_live_bytes'])
+            _al_source = 'frozen post-training'
+        else:
+            htm_al = htm_model_data['al']
+            _al_source = 'post-evaluation (old model)'
+
+        print(f"✅ HTM model loaded  (window={htm_window_size}, "
+              f"thresh={htm_best_thresh:.3f} [{_thresh_source}], "
+              f"AL: {_al_source})")
     except Exception as _e:
         print(f"⚠️  HTM model failed to load: {_e}")
         htm_model_data = None
@@ -325,15 +344,22 @@ def processing_thread():
                         al_score    = htm_al.compute(raw_anomaly)
                         htm_win_count += 1
                         in_warmup = htm_win_count <= HTM_APP_WARMUP
-                        # Collect AL during warmup, then set adaptive threshold
-                        if in_warmup:
-                            htm_warmup_al_scores.append(al_score)
+                        # For new models with live_thresh: threshold is already correct,
+                        # no adaptive calibration needed. Warmup only suppresses TM-reset spike.
+                        # For old models (best_thresh only): adaptively calibrate from warmup.
+                        if in_warmup and not htm_has_live_thresh:
+                            if htm_win_count > HTM_CALIB_SKIP_FIRST:
+                                htm_warmup_al_scores.append(al_score)
                             if htm_win_count == HTM_APP_WARMUP:
-                                # Adaptive threshold: well above the warmup AL floor
-                                floor = float(np.percentile(htm_warmup_al_scores, 95))
-                                htm_effective_thresh = max(floor * 2.0, htm_best_thresh, floor + 0.05)
-                                print(f"HTM adaptive threshold: {htm_effective_thresh:.4f}  "
-                                      f"(warmup floor p95={floor:.4f}, trained={htm_best_thresh:.3f})")
+                                if htm_warmup_al_scores:
+                                    floor = float(np.percentile(htm_warmup_al_scores, 95))
+                                    # Cap at 0.99; floor*2 puts threshold well above the human AL floor
+                                    htm_effective_thresh = min(max(floor * 2.0, htm_best_thresh, floor + 0.05), 0.99)
+                                    print(f"HTM adaptive threshold: {htm_effective_thresh:.4f}  "
+                                          f"(warmup floor p95={floor:.4f}, trained={htm_best_thresh:.3f})")
+                                else:
+                                    htm_effective_thresh = htm_best_thresh
+                                    print(f"HTM adaptive threshold: fallback to trained={htm_best_thresh:.3f}")
                         effective_thresh = htm_effective_thresh if htm_effective_thresh is not None else htm_best_thresh
                         if HTM_DEBUG:
                             d_mean = float(np.mean([e[1] for e in htm_buffer[:htm_window_size]]))
