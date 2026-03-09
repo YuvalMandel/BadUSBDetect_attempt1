@@ -102,11 +102,11 @@ def main():
               "Run htm_combined_train_single.py jobs first.")
         sys.exit(0)
 
-    # Sort: test F1 first, then live_thresh>0 (deployable models first),
-    # then val BAcc, then config_idx (newer = higher = better)
+    # Sort: deployable (live_thresh>0) FIRST, then test F1, then val BAcc,
+    # then config_idx (newer = higher = better)
     records.sort(
-        key=lambda r: (r.get("test_f1", 0),
-                       1 if r.get("live_thresh", 0) > 0 else 0,
+        key=lambda r: (1 if r.get("live_thresh", 0) > 0 else 0,
+                       r.get("test_f1", 0),
                        r.get("val_bacc", r.get("val_f1", 0)),
                        r.get("config_idx", 0)),
         reverse=True)

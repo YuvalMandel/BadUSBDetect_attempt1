@@ -2,12 +2,13 @@
 htm_combined/htm_combined_generate_configs.py
 Generate random HTM-Combined hyperparameter configs and a SLURM script.
 
-Search space refined from round-4 results (126 runs, best test F1 = 0.9189):
-  Best (Round 3): hc0324 — sp=35 pct=0.8, d24w5/f16w9/q24w7, dk8w3/fk16w7/qk8w7,
-                            ws=10s1, tm=32, act=10, wu=2, al=15
-  Best (Round 4): hc0012 — sp=30 pct=0.8, d24w5/f32w7/q24w5, dk16w5/fk8w3/qk16w7,
-                            ws=5s1, tm=16, act=10, min=10, wu=2, al=5
-                  → Only config with test_f1=0.9189 AND live_thresh>0 (live_thresh=0.030)
+Search space refined from round-5 results (384 runs total, 159/384 deployable):
+  Best (Round 5): hc0191 — sp=25 pct=0.8, d16w9/f16w5/q24w7, dk16w5/fk16w5/qk8w7,
+                            ws=10s1, tm=16, act=10, wu=2, al=5
+                  → Best deployable: test_f1=0.9189, val_bacc=0.9667, live_thresh=0.030
+  Non-deployable best: hc0195 — same sp but d24w5/f24w7/q32w9, dk8w5/fk8w7/qk8w3,
+                            ws=10, act=13, wu=2, al=10
+                  → test_f1=0.9444 but live_thresh=0 (not deployable)
 
 New in Round 3: ALL 24 scalar-encoded parameters have independent enc_bits/enc_w:
   - 3 stats channels × (enc_bits, enc_w):
@@ -19,13 +20,17 @@ New in Round 3: ALL 24 scalar-encoded parameters have independent enc_bits/enc_w
       flight_scalar_enc_bits/ flight_scalar_enc_w (last-key flight time, 0-500 ms)
       dist_scalar_enc_bits  / dist_scalar_enc_w   (last-key QWERTY dist, 0-12 u)
 
-Full dataset analysis (117/254 configs deployable across all rounds):
-  window_step=1 always                                 → keep [1]
-  window_size: ws=15 is least efficient                → narrow to [5, 10]
-  al_period: al=15 is weakest; al=5→53, al=10→42 deployable → narrow to [5, 10]
-  Best test_f1=0.9444: hc0195 (ws=10, al=10, act=13) — not deployable
-  Best deployable: hc0191 (ws=10, al=5, val_bacc=0.9667) — Round-5 DEFAULT
-  Round-5 goal: find a config like hc0195 (test_f1=0.9444) that is also deployable
+Round-6 analysis (384 runs, 159 deployable):
+  window_size: ws=10 → 47% deployable, ws=5 → 32%, ws=15 → 47%
+               → narrow to [10] (drop ws=5; ws=15 kept for re-evaluation)
+  al_period: al=5 → 42% (80 dep), al=10 → 38% (57 dep), al=15 → 50% (22 dep)
+             → keep [5, 10, 15] (al=15 surprise: highest rate, but small sample)
+  warmup: wu=2 → 45% deployable, wu=3 → 37%   → bias toward [2], keep [2, 3]
+  tm_act: act=10 → 45% deployable, act=13 → 37% → keep [10, 13]
+  synPermActiveInc: 0.02 → 40%, 0.05 → 41%    → no signal, keep [0.02, 0.05]
+  Best deployable test_f1=0.9189: hc0191 (ws=10, al=5, act=10, wu=2)
+  Round-6 goal: test hc0195's architecture (test_f1=0.9444) with al=5 as DEFAULT
+                and explore ws=15/al=15 combinations for higher deployability
 
 Cumulative workflow — results are never deleted:
   Each run finds the highest config_idx in hc_results/, deletes old
@@ -47,7 +52,7 @@ import random
 from pathlib import Path
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Search space (Round 5 — anchored on hc0012, al_period=[5,10], ws=[5,10])
+# Search space (Round 6 — DEFAULT=hc0195+al5, ws=[10,15], al=[5,10,15])
 # ──────────────────────────────────────────────────────────────────────────────
 PARAM_SPACE = {
     # SpatialPooler
@@ -82,46 +87,46 @@ PARAM_SPACE = {
     "flight_scalar_enc_w":     [3, 5, 7],
     "dist_scalar_enc_bits":    [8, 16],
     "dist_scalar_enc_w":       [3, 5, 7],
-    # Window — ws=5 dominates live_thresh>0 configs; ws=15 dropped
-    "window_size":             [5, 10],
+    # Window — ws=10 → 47% deployable, ws=5 → 32% (dropped); ws=15 re-added (47%)
+    "window_size":             [10, 15],
     "window_step":             [1],
-    # Detection — warmup=0/1 produced degenerate configs; focus on 2-3
+    # Detection — warmup=0/1 produced degenerate configs; wu=2 → 45%, wu=3 → 37%
     "warmup_steps":            [2, 3],
-    # al_period=15 correlates with live_thresh=0; use only [5, 10]
-    "al_period":               [5, 10],
+    # al=5→42%, al=10→38%, al=15→50% (small sample but promising); keep all three
+    "al_period":               [5, 10, 15],
 }
 
-# Default: anchored on hc0191 — best deployable model across all 254 runs
-# (sp=25 pct=0.8, d16w9/f16w5/q24w7, dk16w5/fk16w5/qk8w7, ws=10s1, tm=16, act=10, min=10, wu=2, al=5)
-# hc0191: test_f1=0.9189, val_bacc=0.9667, live_thresh=0.0302
-# (hc0195 has higher test_f1=0.9444 but live_thresh=0 — target of Round 5 is a deployable version)
+# Default: hc0195 params with al=5 — key Round-6 experiment.
+# hc0195 achieved test_f1=0.9444 (best ever) but live_thresh=0 (al=10).
+# Testing its exact architecture with al=5 to check if it becomes deployable.
+# (hc0191 — best deployable — is kept as reference: test_f1=0.9189, val_bacc=0.9667)
 DEFAULT_CONFIG = {
     "sp_columnDimensions":    2048,
     "sp_numActiveColumns":    25,
     "sp_potentialPct":        0.80,
-    "sp_synPermActiveInc":    0.02,
-    "sp_synPermConnected":    0.20,
-    "sp_synPermInactiveDec":  0.003,
+    "sp_synPermActiveInc":    0.05,
+    "sp_synPermConnected":    0.10,
+    "sp_synPermInactiveDec":  0.010,
     "tm_cellsPerColumn":      16,
-    "tm_activationThreshold": 10,
-    "tm_initialPermanence":   0.21,
-    "tm_connectedPermanence": 0.30,
+    "tm_activationThreshold": 13,
+    "tm_initialPermanence":   0.31,
+    "tm_connectedPermanence": 0.50,
     "tm_minThreshold":        10,
-    "tm_maxNewSynapseCount":  25,
+    "tm_maxNewSynapseCount":  20,
     "tm_permanenceIncrement": 0.10,
     "tm_permanenceDecrement": 0.10,
-    "dwell_stats_enc_bits":   16,
-    "dwell_stats_enc_w":      9,
-    "flight_stats_enc_bits":  16,
-    "flight_stats_enc_w":     5,
-    "dist_stats_enc_bits":    24,
-    "dist_stats_enc_w":       7,
-    "dwell_scalar_enc_bits":  16,
+    "dwell_stats_enc_bits":   24,
+    "dwell_stats_enc_w":      5,
+    "flight_stats_enc_bits":  24,
+    "flight_stats_enc_w":     7,
+    "dist_stats_enc_bits":    32,
+    "dist_stats_enc_w":       9,
+    "dwell_scalar_enc_bits":  8,
     "dwell_scalar_enc_w":     5,
-    "flight_scalar_enc_bits": 16,
-    "flight_scalar_enc_w":    5,
+    "flight_scalar_enc_bits": 8,
+    "flight_scalar_enc_w":    7,
     "dist_scalar_enc_bits":   8,
-    "dist_scalar_enc_w":      7,
+    "dist_scalar_enc_w":      3,
     "window_size":            10,
     "window_step":            1,
     "warmup_steps":           2,
