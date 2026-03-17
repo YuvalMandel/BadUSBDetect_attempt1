@@ -42,6 +42,7 @@ import argparse
 import os
 import sys
 import pickle
+import multiprocessing as mp
 from pathlib import Path
 
 _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -73,6 +74,36 @@ WINDOW_PAIRS = [
 ]
 
 
+# ── Multiprocessing worker (module-level so it is picklable) ──────────────────
+_w_cache        = None
+_w_ref_dwells   = None
+_w_ref_flights  = None
+_w_ref_dists    = None
+_w_window_size  = None
+_w_window_step  = None
+
+
+def _init_worker(cache, ref_dwells, ref_flights, ref_dists, window_size, window_step):
+    global _w_cache, _w_ref_dwells, _w_ref_flights, _w_ref_dists
+    global _w_window_size, _w_window_step
+    _w_cache       = cache
+    _w_ref_dwells  = ref_dwells
+    _w_ref_flights = ref_flights
+    _w_ref_dists   = ref_dists
+    _w_window_size = window_size
+    _w_window_step = window_step
+
+
+def _process_file(fp):
+    """Worker: compute combined-window sequence for one file."""
+    events = _w_cache.get(fp)
+    if not events:
+        return fp, None, True   # (path, seq, missing_from_cache)
+    seq = get_file_combined_seq(events, _w_window_size, _w_window_step,
+                                _w_ref_dwells, _w_ref_flights, _w_ref_dists)
+    return fp, seq if seq else None, False
+
+
 def write_slurm_script(out_path: str = "slurm/hc_prepare_windows.sh"):
     script = """\
 #!/bin/bash
@@ -90,8 +121,8 @@ def write_slurm_script(out_path: str = "slurm/hc_prepare_windows.sh"):
 #SBATCH --output=logs/hc_prepare_windows_%A_%a.out
 #SBATCH --error=logs/hc_prepare_windows_%A_%a.err
 #SBATCH --array=0-2
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=64G
 #SBATCH --time=02:00:00
 ##SBATCH --partition=<partition>
 ##SBATCH --account=<account>
@@ -210,15 +241,22 @@ def main():
 
         sequences: dict = {}
         skipped = 0
-        for fp in tqdm(unique_files, desc=f"  ws={window_size}s={window_step}"):
-            events = cache.get(fp)
-            if not events:
-                skipped += 1
-                continue
-            seq = get_file_combined_seq(events, window_size, window_step,
-                                        ref_dwells, ref_flights, ref_dists)
-            if seq:
-                sequences[fp] = seq
+        n_workers = int(os.environ.get("SLURM_CPUS_PER_TASK", mp.cpu_count()))
+        print(f"  Using {n_workers} worker processes.")
+        with mp.Pool(
+            processes=n_workers,
+            initializer=_init_worker,
+            initargs=(cache, ref_dwells, ref_flights, ref_dists, window_size, window_step),
+        ) as pool:
+            for fp, seq, missing in tqdm(
+                pool.imap_unordered(_process_file, unique_files),
+                total=len(unique_files),
+                desc=f"  ws={window_size}s={window_step}",
+            ):
+                if missing:
+                    skipped += 1
+                elif seq is not None:
+                    sequences[fp] = seq
 
         total_windows = sum(len(s) for s in sequences.values())
         print(f"  Sequences: {len(sequences)}/{len(unique_files)} files "
