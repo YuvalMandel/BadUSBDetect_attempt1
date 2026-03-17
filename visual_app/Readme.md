@@ -1,4 +1,72 @@
 BadUSB Detector - Program Architecture
+
+## Setup & Installation
+
+### Step 1 — Install htm.core from source
+
+**`pip install htm.core` from PyPI does not work reliably. You must clone and build from source.**
+
+#### Linux
+
+```bash
+# Install system build dependencies
+sudo apt-get update
+sudo apt-get install -y build-essential cmake python3-dev git
+
+# Clone and build htm.core
+git clone https://github.com/htm-community/htm.core
+cd htm.core
+pip install -v .
+cd ..
+```
+
+#### Windows
+
+**One-time prerequisites:**
+
+1. Install [Visual Studio 2022 Community](https://visualstudio.microsoft.com/vs/community/) (free).
+   During installation select the **"Desktop development with C++"** workload
+   (includes MSVC compiler and CMake).
+
+2. Install [Git for Windows](https://git-scm.com/download/win) if not already installed.
+
+3. Use **Python 3.8–3.10** (64-bit). htm.core does not build on Python 3.11+.
+   Verify: `python --version`
+
+**Build steps** (run in a standard Command Prompt or PowerShell — **not** Git Bash):
+
+```bat
+git clone https://github.com/htm-community/htm.core
+cd htm.core
+pip install -v .
+cd ..
+```
+
+> If you get `cl.exe not found`, open the **"x64 Native Tools Command Prompt for VS 2022"**
+> from the Start menu and re-run `pip install -v .` from inside the `htm.core` folder.
+
+### Step 2 — Install remaining dependencies
+
+```bash
+pip install torch numpy scipy pynput
+```
+
+`tkinter` is included with Python on Windows and most Linux distributions. On Ubuntu/Debian:
+```bash
+sudo apt-get install -y python3-tk
+```
+
+### Step 3 — Run the detector
+
+```bash
+# From the project root (BadUSBDetect_attempt1/)
+python visual_app/bad_usb_detector.py
+```
+
+The HTM model is optional — if `htm.core` is not installed the app falls back to MLP/GRU only.
+
+---
+
 Overview
 This program detects BadUSB attacks by analyzing keyboard typing patterns using machine learning. It monitors keystroke dynamics (dwell time and flight time) in real-time and classifies typing behavior as either human or automated bot/script.
 

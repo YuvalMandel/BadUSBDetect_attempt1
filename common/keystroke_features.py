@@ -24,7 +24,7 @@ FOLDERS = {
         "../UB_keystroke_dataset/s1/rotation/",
         "../UB_keystroke_dataset/s2/rotation/",
     ],
-    "Bots": ["../BadUSBdataset", "../only_timings_dataset"],
+    "Bots": ["../BadUSBdataset", "../only_timings_dataset", "Synthetic_Bots"],
 }
 
 

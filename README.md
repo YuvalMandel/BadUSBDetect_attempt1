@@ -15,11 +15,70 @@ Two models are implemented:
 
 ## Prerequisites
 
+> **Note:** `pip install htm.core` from PyPI often fails or installs a broken build.
+> Install htm.core from source (see instructions below).
+
+### Installing htm.core from source
+
+htm.core requires a C++ compiler and CMake. Follow the instructions for your OS.
+
+#### Linux
+
 ```bash
-pip install htm.core scikit-learn scipy numpy matplotlib seaborn tqdm optuna torch
+# 1. Install system build dependencies
+sudo apt-get update
+sudo apt-get install -y build-essential cmake python3-dev git
+
+# 2. Clone the repository
+git clone https://github.com/htm-community/htm.core
+cd htm.core
+
+# 3. Build and install (takes 5–15 minutes)
+pip install -v .
+
+# 4. Return to the project
+cd ..
 ```
 
-On Technion Newton, activate your virtual environment before running anything:
+#### Windows
+
+**Prerequisites (one-time setup):**
+
+1. Install [Visual Studio 2022 Community](https://visualstudio.microsoft.com/vs/community/) (free).
+   During installation, select the **"Desktop development with C++"** workload.
+   This includes MSVC compiler and CMake.
+
+2. Install [Git for Windows](https://git-scm.com/download/win) if not already installed.
+
+3. Use **Python 3.8–3.10** (64-bit). htm.core may not build on Python 3.11+.
+   Check your version: `python --version`
+
+**Build steps (run in a standard Command Prompt or PowerShell — not Git Bash):**
+
+```bat
+REM 1. Clone the repository
+git clone https://github.com/htm-community/htm.core
+cd htm.core
+
+REM 2. Build and install (takes 10–20 minutes; MSVC compiles C++ extensions)
+pip install -v .
+
+REM 3. Return to the project
+cd ..
+```
+
+> If you see `cl.exe not found`, open the **"x64 Native Tools Command Prompt for VS 2022"**
+> from the Start menu and run the `pip install -v .` command from there.
+
+### All other dependencies
+
+```bash
+pip install scikit-learn scipy numpy matplotlib seaborn tqdm optuna torch pynput
+```
+
+### Technion Newton cluster
+
+Activate your virtual environment before running anything:
 
 ```bash
 source /path/to/.venv/bin/activate
