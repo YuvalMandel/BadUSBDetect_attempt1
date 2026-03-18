@@ -9,13 +9,29 @@ BOTS_TEST_FOLDER = "Synthetic_Bots_test" # Убедитесь, что папка
 MODEL_PATH = "poly_regressor.pkl"
 
 KEYBOARD_MAP = {
+    # Row 3 — QWERTY
     'q': (0, 3), 'w': (1, 3), 'e': (2, 3), 'r': (3, 3), 't': (4, 3),
     'y': (5, 3), 'u': (6, 3), 'i': (7, 3), 'o': (8, 3), 'p': (9, 3),
+    'tab': (-0.5, 3),
+    'oemopenbrackets': (10, 3), 'oemclosebrackets': (11, 3),
+    # Row 2 — ASDF
     'a': (0.5, 2), 's': (1.5, 2), 'd': (2.5, 2), 'f': (3.5, 2), 'g': (4.5, 2),
     'h': (5.5, 2), 'j': (6.5, 2), 'k': (7.5, 2), 'l': (8.5, 2),
+    'oemsemicolon': (9.5, 2), 'oemquotes': (10.5, 2), 'return': (12.5, 2),
+    # Row 1 — ZXCV
+    'lshiftkey': (-1, 1),
     'z': (1, 1), 'x': (2, 1), 'c': (3, 1), 'v': (4, 1), 'b': (5, 1),
     'n': (6, 1), 'm': (7, 1),
-    'space': (4.5, 0)
+    'oemcomma': (8, 1), 'oemperiod': (9, 1), 'oemquestion': (10, 1),
+    'rshiftkey': (12.5, 1),
+    # Row 0 — bottom
+    'lcontrolkey': (0, 0), 'space': (4.5, 0), 'rcontrolkey': (13, 0),
+    # Row 4 — numbers
+    'd1': (1, 4), 'd2': (2, 4), 'd3': (3, 4), 'd4': (4, 4), 'd5': (5, 4),
+    'd6': (6, 4), 'd7': (7, 4), 'd8': (8, 4), 'd9': (9, 4), 'd0': (10, 4),
+    'oemminus': (11, 4), 'oemplus': (12, 4), 'back': (13.5, 4),
+    # Arrow cluster
+    'up': (15, 1), 'left': (14, 0), 'down': (15, 0), 'right': (16, 0),
 }
 
 def parse_and_extract_test(filepath):
