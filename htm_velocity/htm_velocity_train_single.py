@@ -31,6 +31,14 @@ _htm_vel_dir = os.path.dirname(os.path.abspath(__file__))
 if _htm_vel_dir not in sys.path:
     sys.path.insert(0, _htm_vel_dir)
 
+_htm_combined_dir = os.path.join(_project_root, "htm_combined")
+if _htm_combined_dir not in sys.path:
+    sys.path.insert(0, _htm_combined_dir)
+
+_htm_dist_dir = os.path.join(_project_root, "htm_distance")
+if _htm_dist_dir not in sys.path:
+    sys.path.insert(0, _htm_dist_dir)
+
 os.chdir(_project_root)
 
 import argparse
