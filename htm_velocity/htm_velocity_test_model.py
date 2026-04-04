@@ -358,8 +358,9 @@ def main():
                         default="../UB_keystroke_dataset/",
                         help="Human .txt files root (all_other_files mode)")
     parser.add_argument("--bots_root",
-                        default="../BadUSBdataset",
-                        help="Bot .txt files root (all_other_files mode)")
+                        nargs='+',
+                        default=["../BadUSBdataset"],
+                        help="One or more bot .txt file roots (all_other_files mode)")
     parser.add_argument("--poly_model", default=POLY_MODEL,
                         help=f"Path to poly_regressor.pkl (default: {POLY_MODEL})")
     parser.add_argument("--write_decision_log", action="store_true",
@@ -562,8 +563,10 @@ def main():
 
         candidate_humans = [p for p in walk_txt(os.path.abspath(args.data_root))
                             if os.path.basename(p) not in split_names]
-        candidate_bots   = [p for p in walk_txt(os.path.abspath(args.bots_root))
-                            if os.path.basename(p) not in split_names]
+        candidate_bots = []
+        for bots_root in args.bots_root:
+            candidate_bots += [p for p in walk_txt(os.path.abspath(bots_root))
+                               if os.path.basename(p) not in split_names]
 
         print(f"  Human candidates: {len(candidate_humans)}")
         print(f"  Bot candidates:   {len(candidate_bots)}")

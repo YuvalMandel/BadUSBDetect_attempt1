@@ -47,7 +47,7 @@ python -u htm_velocity/htm_velocity_test_model.py \
     --model     "$MODEL" \
     --mode      all_other_files \
     --data_root "$DATA_ROOT" \
-    --bots_root "$BOTS_ROOT"
+    --bots_root $BOTS_ROOT
 
 echo "========================================"
 echo "End   : $(date)"
