@@ -11,6 +11,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from scipy import stats
+import joblib
 
 # --- SETTINGS ---
 WINDOW_SIZE = 15  # MLP / GRU window size (keystrokes)
@@ -24,12 +25,14 @@ REF_POOL_PATH   = os.path.join(_project_root, "reference_pool.npz")
 MODEL_GRU_PATH  = os.path.join(_project_root, "gru_model.pth")
 SCALER_GRU_PATH = os.path.join(_project_root, "rnn_scaler_params.npy")
 
+POLY_MODEL_PATH = os.path.join(_project_root, "poly_regressor.pkl")
+
 MODEL_HTM_PATH  = os.path.join(
-    _project_root, "hc_models",
-    "hc0191_sp25_d16w9_f16w5_q24w7_dk16w5_fk16w5_qk8w7_ws10s1_tm16_act10_wu2_al5_vf10.7273_tf10.9189.pkl"
+    _project_root, "hv_models",
+    "hv0102_sp30_d24w9_f16w9_q24w7_dk8w3_fk8w3_qk16w7_pm16w7_pd8w5_ps16w5_ws15s1_tm16_act10_wu2_al10_vf10.9952_tf10.9964.pkl"
 )
 HTM_APP_WARMUP       = 5   # windows to skip before alarming (covers TM-reset spike)
-HTM_CALIB_SKIP_FIRST = 5   # skip first N warmup windows from adaptive calibration (TM reset spike)
+HTM_CALIB_SKIP_FIRST = 5   # skip first N warmup windows from adaptive calibration
 HTM_DEBUG      = True  # print per-window anomaly details for HTM
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -40,12 +43,17 @@ _htm_available = False
 try:
     for _d in (_project_root,
                os.path.join(_project_root, "htm_combined"),
-               os.path.join(_project_root, "htm_distance")):
+               os.path.join(_project_root, "htm_distance"),
+               os.path.join(_project_root, "htm_velocity")):
         if _d not in sys.path:
             sys.path.insert(0, _d)
     from htm.bindings.sdr import SDR as _SDR
     from htm_distance_common import key_to_char, char_to_idx, qwerty_distance
-    from htm_combined_common import extract_combined_window
+    from htm_velocity_common import (
+        extract_velocity_window,
+        CHAR_TO_KMAP as _HV_CHAR_TO_KMAP,
+        KEYBOARD_MAP as _HV_KEYBOARD_MAP,
+    )
     _htm_available = True
 except ImportError as _e:
     print(f"HTM not available ({_e}); HTM mode disabled.")
@@ -54,6 +62,7 @@ except ImportError as _e:
 raw_events_queue = queue.Queue()
 gui_update_queue = queue.Queue()
 control_queue    = queue.Queue()
+
 
 # ==============================================================================
 # 1. MODEL ARCHITECTURES
@@ -103,6 +112,8 @@ class GRUBotDetector(nn.Module):
 # ==============================================================================
 print("Loading models...")
 try:
+    poly_model = joblib.load(POLY_MODEL_PATH)
+
     mlp_model = BadUSBClassifier(input_dim=14).to(device)
     mlp_model.load_state_dict(torch.load(MODEL_MLP_PATH, map_location=device))
     mlp_model.eval()
@@ -115,7 +126,7 @@ try:
 
     refs = np.load(REF_POOL_PATH)
     ref_dwells, ref_flights = refs['dwell'], refs['flight']
-    print("✅ MLP + GRU models loaded!")
+    print("✅ MLP + GRU + poly models loaded!")
 except Exception as e:
     print(f"❌ Error: {e}")
     exit(1)
@@ -134,7 +145,7 @@ htm_ref_dwells      = None
 htm_ref_flights     = None
 htm_ref_dists       = None
 htm_active_cols_sdr  = None
-htm_has_live_thresh  = False   # True when model has a properly calibrated live_thresh
+htm_has_live_thresh  = False
 
 if _htm_available:
     try:
@@ -151,15 +162,10 @@ if _htm_available:
         htm_ref_dists   = htm_model_data['ref_dists']
         htm_active_cols_sdr = _SDR(htm_sp.getColumnDimensions())
 
-        # Prefer live_thresh (calibrated in per-file mode matching live deployment).
-        # Fall back to best_thresh (calibrated in shared-AL mode) + adaptive.
         htm_has_live_thresh = 'live_thresh' in htm_model_data
-        htm_best_thresh = htm_model_data.get('live_thresh',
-                                             htm_model_data['best_thresh'])
+        htm_best_thresh = htm_model_data.get('live_thresh', htm_model_data['best_thresh'])
         _thresh_source = 'live' if htm_has_live_thresh else 'shared-AL (adaptive fallback)'
 
-        # Restore AL from post-training frozen state if available;
-        # otherwise fall back to the post-evaluation state.
         if 'al_live_bytes' in htm_model_data:
             htm_al = pickle.loads(htm_model_data['al_live_bytes'])
             _al_source = 'frozen post-training'
@@ -167,7 +173,7 @@ if _htm_available:
             htm_al = htm_model_data['al']
             _al_source = 'post-evaluation (old model)'
 
-        print(f"✅ HTM model loaded  (window={htm_window_size}, "
+        print(f"✅ HTM Velocity model loaded  (window={htm_window_size}, "
               f"thresh={htm_best_thresh:.3f} [{_thresh_source}], "
               f"AL: {_al_source})")
     except Exception as _e:
@@ -225,14 +231,15 @@ def processing_thread():
     dwell_buffer  = []
     flight_buffer = []
 
-    # HTM state
-    htm_active_keys      = {}       # key_str → (char, down_ts)
+    # HTM Velocity state
+    htm_active_keys      = {}   # key_str → (char, down_ts)
     htm_prev_char        = None
     htm_prev_keyup_ts    = None
-    htm_buffer           = []       # list of (key_idx, dwell_ms, flight_ms, dist)
-    htm_win_count        = 0        # windows processed since last reset
-    htm_warmup_al_scores = []       # AL values collected during warmup
-    htm_effective_thresh = None     # adaptive threshold set after warmup
+    htm_buffer           = []   # (key_idx, dwell, flight, dist)
+    htm_vel_buffer       = []   # (key_idx, dwell, flight, dist, poly_err)
+    htm_win_count        = 0
+    htm_warmup_al_scores = []
+    htm_effective_thresh = None
 
     consecutive_strikes = 0
 
@@ -247,6 +254,7 @@ def processing_thread():
                 active_keys.clear()
                 last_keyup_ts = None
                 htm_buffer.clear()
+                htm_vel_buffer.clear()
                 htm_active_keys.clear()
                 htm_prev_char        = None
                 htm_prev_keyup_ts    = None
@@ -255,8 +263,6 @@ def processing_thread():
                 htm_effective_thresh = None
                 if htm_model_data is not None:
                     htm_tm.reset()
-                    # Restore AL to the clean calibrated state so live_thresh
-                    # remains valid and bot-session history doesn't carry over.
                     global htm_al
                     if 'al_live_bytes' in htm_model_data:
                         htm_al = pickle.loads(htm_model_data['al_live_bytes'])
@@ -276,7 +282,7 @@ def processing_thread():
                 delta = ts - last_keyup_ts
                 if 0 < delta < 2000:
                     flight_buffer.append(float(delta))
-            # HTM: track printable key presses
+            # HTM
             if _htm_available:
                 char = key_to_char(key)
                 if char is not None:
@@ -289,7 +295,7 @@ def processing_thread():
                 delta = ts - down_ts
                 if 0 < delta < 2000:
                     dwell_buffer.append(float(delta))
-            # HTM: complete a printable keystroke
+            # HTM
             if _htm_available and key in htm_active_keys:
                 char, down_ts = htm_active_keys.pop(key)
                 dwell = float(ts - down_ts)
@@ -297,7 +303,22 @@ def processing_thread():
                     flight = float(down_ts - htm_prev_keyup_ts) if htm_prev_keyup_ts is not None else 0.0
                     flight = max(0.0, min(flight, 5000.0))
                     dist   = qwerty_distance(htm_prev_char, char) if htm_prev_char is not None else 0.0
+
+                    # Poly error: Fitts's Law |actual_flight - predicted_flight|
+                    poly_err = float('nan')
+                    if htm_prev_char is not None:
+                        prev_kmap = _HV_CHAR_TO_KMAP.get(htm_prev_char)
+                        curr_kmap = _HV_CHAR_TO_KMAP.get(char)
+                        if (prev_kmap and curr_kmap
+                                and prev_kmap in _HV_KEYBOARD_MAP
+                                and curr_kmap in _HV_KEYBOARD_MAP):
+                            x1, y1 = _HV_KEYBOARD_MAP[prev_kmap]
+                            x2, y2 = _HV_KEYBOARD_MAP[curr_kmap]
+                            pred     = poly_model.predict([[x1, y1, x2, y2]])[0]
+                            poly_err = abs(flight - float(pred))
+
                     htm_buffer.append((char_to_idx(char), dwell, flight, dist))
+                    htm_vel_buffer.append((char_to_idx(char), dwell, flight, dist, poly_err))
                     htm_prev_char     = char
                     htm_prev_keyup_ts = ts
 
@@ -334,31 +355,29 @@ def processing_thread():
 
         elif CURRENT_MODEL == "HTM" and htm_model_data is not None:
             if len(htm_buffer) >= htm_window_size:
-                result = extract_combined_window(
-                    htm_buffer, 0, htm_window_size,
+                result = extract_velocity_window(
+                    htm_buffer, htm_vel_buffer, 0, htm_window_size,
                     htm_ref_dwells, htm_ref_flights, htm_ref_dists)
                 if result is not None:
-                    stats_21, kid, dw, fl, di = result
+                    stats_21, kid, dw, fl, di, poly_mean, poly_med, poly_std = result
                     avg_flight = float(np.mean([e[2] for e in htm_buffer[:htm_window_size]]))
                     try:
                         enc_sdr = _SDR(htm_input_width)
-                        enc_sdr.dense = htm_encoder.encode(stats_21, kid, dw, fl, di)
+                        enc_sdr.dense = htm_encoder.encode(stats_21, kid, dw, fl, di,
+                                                           poly_mean, poly_med, poly_std)
                         htm_sp.compute(enc_sdr, False, htm_active_cols_sdr)
                         htm_tm.compute(htm_active_cols_sdr, learn=False)
                         raw_anomaly = float(htm_tm.anomaly)
                         al_score    = htm_al.compute(raw_anomaly)
                         htm_win_count += 1
                         in_warmup = htm_win_count <= HTM_APP_WARMUP
-                        # For new models with live_thresh: threshold is already correct,
-                        # no adaptive calibration needed. Warmup only suppresses TM-reset spike.
-                        # For old models (best_thresh only): adaptively calibrate from warmup.
+
                         if in_warmup and not htm_has_live_thresh:
                             if htm_win_count > HTM_CALIB_SKIP_FIRST:
                                 htm_warmup_al_scores.append(al_score)
                             if htm_win_count == HTM_APP_WARMUP:
                                 if htm_warmup_al_scores:
                                     floor = float(np.percentile(htm_warmup_al_scores, 95))
-                                    # Cap at 0.99; floor*2 puts threshold well above the human AL floor
                                     htm_effective_thresh = min(max(floor * 2.0, htm_best_thresh, floor + 0.05), 0.99)
                                     print(f"HTM adaptive threshold: {htm_effective_thresh:.4f}  "
                                           f"(warmup floor p95={floor:.4f}, trained={htm_best_thresh:.3f})")
@@ -366,6 +385,7 @@ def processing_thread():
                                     htm_effective_thresh = htm_best_thresh
                                     print(f"HTM adaptive threshold: fallback to trained={htm_best_thresh:.3f}")
                         effective_thresh = htm_effective_thresh if htm_effective_thresh is not None else htm_best_thresh
+
                         if HTM_DEBUG:
                             d_mean = float(np.mean([e[1] for e in htm_buffer[:htm_window_size]]))
                             f_mean = float(np.mean([e[2] for e in htm_buffer[:htm_window_size]]))
@@ -374,14 +394,18 @@ def processing_thread():
                             warmup_tag = f"[warmup {htm_win_count}/{HTM_APP_WARMUP}]" if in_warmup else ""
                             print(f"HTM win={htm_win_count:>4} {warmup_tag:<18} "
                                   f"raw={raw_anomaly:.3f}  AL={al_score:.3f}  thresh={effective_thresh:.3f}  "
-                                  f"dwell={d_mean:.0f}ms  flight={f_mean:.0f}ms  dist={q_mean:.2f}{flag}")
+                                  f"dwell={d_mean:.0f}ms  flight={f_mean:.0f}ms  dist={q_mean:.2f}  "
+                                  f"poly={poly_mean:.1f}ms{flag}")
+
                         if not in_warmup:
                             score = al_score
                     except Exception as ex:
                         print(f"HTM inference error: {ex}")
                         htm_buffer.pop(0)
+                        htm_vel_buffer.pop(0)
                         continue
                 htm_buffer.pop(0)
+                htm_vel_buffer.pop(0)
 
         # ── 5. STRIKE LOGIC & GUI UPDATE ───────────────────────────────────────
         if score is None:
@@ -451,7 +475,7 @@ class BadUSBApp:
         ttk.Radiobutton(self.frame, text="Sequence + GRU (Instant)",
                         variable=self.model_var, value="GRU",
                         command=self.change_model).pack()
-        htm_rb = ttk.Radiobutton(self.frame, text="HTM Combined (1 Strike)",
+        htm_rb = ttk.Radiobutton(self.frame, text="HTM Velocity (1 Strike)",
                                   variable=self.model_var, value="HTM",
                                   command=self.change_model)
         htm_rb.pack()
