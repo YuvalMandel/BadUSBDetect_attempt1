@@ -9,10 +9,10 @@
 #SBATCH --job-name=hc_htm
 #SBATCH --output=logs/hc_%A_%a.out
 #SBATCH --error=logs/hc_%A_%a.err
-#SBATCH --array=0-4%200
+#SBATCH --array=0-127%200
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
-#SBATCH --time=08:00:00
+#SBATCH --time=16:00:00
 ##SBATCH --partition=<partition>
 ##SBATCH --account=<account>
 
@@ -35,4 +35,4 @@ echo "Config: $CONFIG"
 echo "Node  : $(hostname)"
 echo "========================================"
 
-python htm_combined/htm_combined_train_single.py --config "$CONFIG"
+python -u htm_combined/htm_combined_train_single.py --config "$CONFIG"
