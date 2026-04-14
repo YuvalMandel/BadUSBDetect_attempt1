@@ -27,7 +27,7 @@ conda activate htm_keyboard_1
 MODEL="hc_models/<slug>.pkl"
 MODE="all_other_files"        # orig | all_non_train | all_other_files
 DATA_ROOT="../UB_keystroke_dataset/"
-BOTS_ROOT="../BadUSBdataset"
+BOTS_ROOT="Synthetic_Bots"
 # -----------------------------------------------------------------
 
 echo "========================================"
