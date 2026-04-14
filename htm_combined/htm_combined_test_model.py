@@ -291,14 +291,27 @@ def eval_and_report(all_scores, all_labels, all_seqs, best_thresh, warmup,
                                 zero_division=0))
 
     if do_plot and plot_prefix is not None:
-        cm = confusion_matrix(all_labels, preds)
+        present_classes = sorted(set(all_labels))
         plt.figure(figsize=(6, 5))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False)
-        plt.title(f"{subset_name} (F1={f1:.4f}  BAcc={bacc:.4f})")
-        plt.xlabel('Predicted')
-        plt.ylabel('Actual')
-        plt.xticks([0.5, 1.5], ['Human', 'Bot'])
-        plt.yticks([0.5, 1.5], ['Human', 'Bot'])
+        if len(present_classes) == 1:
+            # Only one class present — draw a 1-row vector instead of a full matrix
+            cls = present_classes[0]
+            cls_name = 'Bot' if cls == 1 else 'Human'
+            cm_vec = confusion_matrix(all_labels, preds, labels=[cls])
+            sns.heatmap(cm_vec, annot=True, fmt='d', cmap='Blues', cbar=False)
+            plt.title(f"{subset_name} (only {cls_name}s)  F1={f1:.4f}  BAcc={bacc:.4f}")
+            plt.xlabel('Predicted')
+            plt.ylabel('Actual')
+            plt.xticks([0.5], [cls_name])
+            plt.yticks([0.5], [cls_name])
+        else:
+            cm = confusion_matrix(all_labels, preds)
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False)
+            plt.title(f"{subset_name} (F1={f1:.4f}  BAcc={bacc:.4f})")
+            plt.xlabel('Predicted')
+            plt.ylabel('Actual')
+            plt.xticks([0.5, 1.5], ['Human', 'Bot'])
+            plt.yticks([0.5, 1.5], ['Human', 'Bot'])
         plt.tight_layout()
         fpath = os.path.join(PLOTS_DIR,
                              f"{plot_prefix}_{subset_name.replace(' ', '_').lower()}_confusion.png")
