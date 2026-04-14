@@ -298,8 +298,11 @@ def eval_and_report(all_scores, all_labels, all_seqs, best_thresh, warmup,
             cls = present_classes[0]
             cls_name = 'Bot' if cls == 1 else 'Human'
             cm_vec = confusion_matrix(all_labels, preds, labels=[cls])
+            correct = int(cm_vec[0, 0])
+            total   = len(all_labels)
+            metric  = f"Detection rate: {correct}/{total}" if cls == 1 else f"Correct: {correct}/{total}"
             sns.heatmap(cm_vec, annot=True, fmt='d', cmap='Blues', cbar=False)
-            plt.title(f"{subset_name} (only {cls_name}s)  F1={f1:.4f}  BAcc={bacc:.4f}")
+            plt.title(f"{subset_name} (only {cls_name}s)  {metric}")
             plt.xlabel('Predicted')
             plt.ylabel('Actual')
             plt.xticks([0.5], [cls_name])
