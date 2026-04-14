@@ -24,10 +24,10 @@ source $(conda info --base)/etc/profile.d/conda.sh
 conda activate htm_keyboard_1
 
 # ---- Edit these -------------------------------------------------
-MODEL="hc_models/<slug>.pkl"
+MODEL="hc_models/hc0191_sp25_d16w9_f16w5_q24w7_dk16w5_fk16w5_qk8w7_ws10s1_tm16_act10_wu2_al5_vf10.7273_tf10.9189.pkl"
 MODE="all_other_files"        # orig | all_non_train | all_other_files
 DATA_ROOT="../UB_keystroke_dataset/"
-BOTS_ROOT="../BadUSBdataset"
+BOTS_ROOT="Synthetic_Bots/"
 # -----------------------------------------------------------------
 
 echo "========================================"
