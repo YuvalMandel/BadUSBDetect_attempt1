@@ -4,7 +4,7 @@ import numpy as np
 
 # --- SETTINGS ---
 OUTPUT_DIR = "Synthetic_Bots"
-FILES_PER_TYPE = 100       # Number of files per attack type
+FILES_PER_TYPE = 500       # Number of files per attack type
 EVENTS_PER_FILE = 80     # Length of one file (number of key presses)
 
 # Base timestamp for start (in milliseconds, simulating Unix Epoch)
