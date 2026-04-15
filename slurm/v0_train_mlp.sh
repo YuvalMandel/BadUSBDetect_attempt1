@@ -1,14 +1,7 @@
 #!/bin/bash
 # ============================================================
 # SLURM job: BadUSBv0 MLP pipeline
-#
-# Runs from project root:
 #   sbatch slurm/v0_train_mlp.sh
-#
-# Prerequisites on the cluster:
-#   - data_split.json exists (run split_persons.py locally and push, or
-#     run `python BadUSBv0/BadUSB/split_persons.py` as a pre-step)
-#   - dataset_generator/Synthetic_Bots/ and s2/ are present
 # ============================================================
 #SBATCH --job-name=v0_mlp
 #SBATCH --output=logs/v0_mlp_%j.out
@@ -19,57 +12,63 @@
 ##SBATCH --partition=<partition>
 ##SBATCH --account=<account>
 
+set -e   # stop immediately on any error
+
 source $(conda info --base)/etc/profile.d/conda.sh
 conda activate htm_keyboard_1
 
-WORK=BadUSBv0/BadUSB
+# ── Absolute paths ────────────────────────────────────────────────────────────
+ROOT="$SLURM_SUBMIT_DIR"          # project root (where sbatch was run)
+WORK="$ROOT/BadUSBv0/BadUSB"
+DATA="$WORK/dataset_generator"
 
 echo "========================================"
 echo "Job   : $SLURM_JOB_ID"
 echo "Node  : $(hostname)"
 echo "CPUs  : $SLURM_CPUS_PER_TASK"
+echo "ROOT  : $ROOT"
 echo "Start : $(date)"
 echo "========================================"
 
-# ── Step 1: generate bots + humans (fast, skip if already done) ──────────────
-if [ ! -d "$WORK/dataset_generator/Synthetic_Bots" ]; then
-    echo "--- Generating bots ---"
-    cd $WORK/dataset_generator && python -X utf8 bot_generator.py -o Synthetic_Bots -f 25 -e 80
-    python -X utf8 bot_generator.py -o Synthetic_Bots_test -f 5 -e 80
-    python -X utf8 human_generator.py -o Balanced_Humans -f 124 -l 80 -e 1
-    python -X utf8 human_generator.py -o Balanced_Humans_test -f 24 -l 80 -e 0
-    cd -
+# ── Step 1: generate bots + humans (skip if already done) ────────────────────
+if [ ! -d "$DATA/Synthetic_Bots" ]; then
+    echo "--- Generating datasets ---"
+    cd "$DATA"
+    python -X utf8 bot_generator.py     -o Synthetic_Bots      -f 25 -e 80
+    python -X utf8 bot_generator.py     -o Synthetic_Bots_test -f  5 -e 80
+    python -X utf8 human_generator.py   -o Balanced_Humans      -f 124 -l 80 -e 1
+    python -X utf8 human_generator.py   -o Balanced_Humans_test -f  24 -l 80 -e 0
+    cd "$ROOT"
 fi
 
 # ── Step 2: person-disjoint split (skip if already done) ─────────────────────
 if [ ! -f "$WORK/data_split.json" ]; then
     echo "--- Creating person-disjoint split ---"
-    cd $WORK && python -X utf8 split_persons.py --bots-dir dataset_generator/Synthetic_Bots
-    cd -
+    cd "$WORK"
+    python -X utf8 split_persons.py --bots-dir dataset_generator/Synthetic_Bots
+    cd "$ROOT"
 fi
 
-# ── Step 3: train regressor ───────────────────────────────────────────────────
+# ── Step 3: train polynomial regressor ───────────────────────────────────────
 echo "--- Training polynomial regressor ---"
-cd $WORK/MLP/regressor
+cd "$WORK/MLP/regressor"
 python -X utf8 regressor_train.py \
-    -hu ../../dataset_generator/Balanced_Humans \
+    -hu "$DATA/Balanced_Humans" \
     -m  poly_regressor.pkl
 python -X utf8 test_regressor.py \
-    -hu ../../dataset_generator/Balanced_Humans_test \
-    -b  ../../dataset_generator/Synthetic_Bots_test \
+    -hu "$DATA/Balanced_Humans_test" \
+    -b  "$DATA/Synthetic_Bots_test" \
     -m  poly_regressor.pkl
-cp poly_regressor.pkl ../poly_regressor.pkl
-cd -
+cp poly_regressor.pkl "$WORK/MLP/poly_regressor.pkl"
 
 # ── Step 4: feature extraction → 3 CSVs ──────────────────────────────────────
 echo "--- Feature extraction (person-disjoint splits) ---"
-cd $WORK/MLP
-python -X utf8 dataset_csv_generator.py --split-json ../data_split.json
+cd "$WORK/MLP"
+python -X utf8 dataset_csv_generator.py --split-json "$WORK/data_split.json"
 
 # ── Step 5: train MLP ─────────────────────────────────────────────────────────
 echo "--- Training MLP ---"
 python -X utf8 model_training.py
-cd -
 
 echo "========================================"
 echo "End : $(date)"
