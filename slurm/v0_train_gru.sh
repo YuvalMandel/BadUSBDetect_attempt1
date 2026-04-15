@@ -16,6 +16,7 @@ set -e
 
 source $(conda info --base)/etc/profile.d/conda.sh
 conda activate htm_keyboard_1
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 ROOT="$SLURM_SUBMIT_DIR"
 WORK="$ROOT/BadUSBv0/BadUSB"

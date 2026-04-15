@@ -16,6 +16,7 @@ set -e   # stop immediately on any error
 
 source $(conda info --base)/etc/profile.d/conda.sh
 conda activate htm_keyboard_1
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
 # ── Absolute paths ────────────────────────────────────────────────────────────
 ROOT="$SLURM_SUBMIT_DIR"          # project root (where sbatch was run)
