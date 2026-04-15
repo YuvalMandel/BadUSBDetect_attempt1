@@ -231,6 +231,7 @@ def main():
         inputDimensions=(input_width,),
         columnDimensions=(n_columns,),
         globalInhibition=True,
+        localAreaDensity=0,   # mutex with numActiveColumnsPerInhArea; default is 0.05 which conflicts
         seed=seed,
         **{v: cfg[k] for k, v in SP_KEYS.items() if k in cfg},
     )
