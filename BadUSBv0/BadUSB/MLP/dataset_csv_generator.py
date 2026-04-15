@@ -15,7 +15,8 @@ import multiprocessing
 WINDOW_SIZE = 15
 STEP_SIZE_HUMAN = 1
 STEP_SIZE_BOT = 1
-NUM_REFERENCES = 50
+NUM_REFERENCES = 20     # diminishing returns beyond ~15-20 references
+MAX_WINDOWS_PER_FILE = 80  # UB files are ~1000 keystrokes; cap matches original ~80-keystroke generated files
 
 OUTPUT_REFS = "reference_pool.npz"
 POLY_MODEL_PATH = "poly_regressor.pkl"
@@ -122,13 +123,18 @@ def extract_features(w_d, w_f_detailed, reference_pool_d, reference_pool_f, poly
 # ==============================================================================
 # 3. WORKER FUNCTION
 # ==============================================================================
-def process_single_file(filepath, label, step_size, ref_dwells, ref_flights, poly_model):
-    rows = []
+def process_single_file(filepath, label, step_size, ref_dwells, ref_flights, poly_model,
+                        max_windows=None):
     d, f_det = parse_file(filepath)
     min_len = min(len(d), len(f_det))
     if min_len < WINDOW_SIZE: return []
 
-    for i in range(0, min_len - WINDOW_SIZE, step_size):
+    indices = list(range(0, min_len - WINDOW_SIZE, step_size))
+    if max_windows is not None and len(indices) > max_windows:
+        indices = random.sample(indices, max_windows)
+
+    rows = []
+    for i in indices:
         w_d = d[i : i + WINDOW_SIZE]
         w_f = f_det[i : i + WINDOW_SIZE]
         feats = extract_features(w_d, w_f, ref_dwells, ref_flights, poly_model)
@@ -166,8 +172,8 @@ COLS = [
 
 def process_split(split_name, human_files, bot_files, ref_d, ref_f, poly_model, max_workers):
     tasks = (
-        [(f, 0, STEP_SIZE_HUMAN, ref_d, ref_f, poly_model) for f in human_files] +
-        [(f, 1, STEP_SIZE_BOT,   ref_d, ref_f, poly_model) for f in bot_files]
+        [(f, 0, STEP_SIZE_HUMAN, ref_d, ref_f, poly_model, MAX_WINDOWS_PER_FILE) for f in human_files] +
+        [(f, 1, STEP_SIZE_BOT,   ref_d, ref_f, poly_model, None)                 for f in bot_files]
     )
 
     rows = []
