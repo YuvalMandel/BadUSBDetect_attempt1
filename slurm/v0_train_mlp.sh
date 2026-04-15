@@ -52,7 +52,11 @@ fi
 if [ ! -f "$WORK/data_split.json" ]; then
     echo "--- Creating person-disjoint split ---"
     cd "$WORK"
-    python -X utf8 split_persons.py --bots-dir dataset_generator/Synthetic_Bots
+    python -X utf8 split_persons.py \
+        --bots-dir dataset_generator/Synthetic_Bots \
+        --ub-dir   "$ROOT/../UB_keystroke_dataset" \
+        --sessions s0 s1 s2 \
+        --tasks    1
     cd "$ROOT"
 fi
 
