@@ -35,8 +35,9 @@ from keystroke_features import RANDOM_SEED
 # --- Configuration ---
 SPLIT_JSON = os.path.join(_badusb_root, "data_split.json")
 OUTPUT_CACHE = os.path.join(_here, "windows_cache.pkl")
-WINDOW_SIZE = 10
-WINDOW_STEP = 1
+WINDOW_SIZE    = 10
+WINDOW_STEP    = 1
+MAX_KEYSTROKES = 150  # truncate every file to first N keystrokes (same across MLP/GRU/HTM)
 
 # --- Multiprocessing worker ---
 _w_cache = None
@@ -82,7 +83,7 @@ def main():
     for fp in tqdm(unique_files, desc="Parsing files"):
         events = parse_file_distance(fp)
         if events:
-            event_cache[fp] = events
+            event_cache[fp] = events[:MAX_KEYSTROKES]
 
     print(f"Building reference pool from {len(split['train']['humans'])} training human files...")
     ref_dwells, ref_flights, ref_dists = create_reference_pool(

@@ -7,8 +7,9 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 # --- SETTINGS ---
-SEQ_LEN   = 15   # Sequence length
-STEP_SIZE = 1    # Sliding window step
+SEQ_LEN        = 15   # Sequence length
+STEP_SIZE      = 1    # Sliding window step
+MAX_KEYSTROKES = 150  # truncate every file to first N keystrokes (same across MLP/GRU/HTM)
 
 OUTPUT_FILE = "rnn_dataset.pt"
 SCALER_FILE = "rnn_scaler_params.npy"
@@ -50,7 +51,7 @@ def parse_file(filepath):
                 delta   = (ts - down_ts) / scale
                 if 0 < delta < 3000: dwells.append(delta)
 
-    min_len = min(len(dwells), len(flights))
+    min_len = min(len(dwells), len(flights), MAX_KEYSTROKES)
     return np.array(dwells[:min_len]), np.array(flights[:min_len])
 
 # ==============================================================================
