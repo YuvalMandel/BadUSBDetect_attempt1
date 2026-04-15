@@ -205,10 +205,40 @@ def main():
     max_v += 0.1 * np.where(range_v > 0, range_v, 0.1)
 
     print("Building HTM...")
-    encoder = CombinedEncoder(min_v, max_v, **cfg)
+    encoder = CombinedEncoder(min_v, max_v, **{k: v for k, v in cfg.items()
+                                               if k.endswith('_enc_bits') or k.endswith('_enc_w')})
     input_width = encoder.total_bits
-    sp = SpatialPooler(inputDimensions=(input_width,), columnDimensions=(cfg['sp_columnDimensions'],), **cfg)
-    tm = TemporalMemory(columnDimensions=(cfg['sp_columnDimensions'],), **cfg)
+    n_columns = cfg.get('sp_columnDimensions', 2048)
+
+    SP_KEYS = {
+        'sp_potentialPct':       'potentialPct',
+        'sp_synPermActiveInc':   'synPermActiveInc',
+        'sp_synPermConnected':   'synPermConnected',
+        'sp_synPermInactiveDec': 'synPermInactiveDec',
+        'sp_numActiveColumns':   'numActiveColumnsPerInhArea',
+    }
+    TM_KEYS = {
+        'tm_cellsPerColumn':        'cellsPerColumn',
+        'tm_activationThreshold':   'activationThreshold',
+        'tm_initialPermanence':     'initialPermanence',
+        'tm_connectedPermanence':   'connectedPermanence',
+        'tm_minThreshold':          'minThreshold',
+        'tm_maxNewSynapseCount':    'maxNewSynapseCount',
+        'tm_permanenceIncrement':   'permanenceIncrement',
+        'tm_permanenceDecrement':   'permanenceDecrement',
+    }
+    sp = SpatialPooler(
+        inputDimensions=(input_width,),
+        columnDimensions=(n_columns,),
+        globalInhibition=True,
+        seed=seed,
+        **{v: cfg[k] for k, v in SP_KEYS.items() if k in cfg},
+    )
+    tm = TemporalMemory(
+        columnDimensions=(n_columns,),
+        seed=seed,
+        **{v: cfg[k] for k, v in TM_KEYS.items() if k in cfg},
+    )
     active_columns = SDR(sp.getColumnDimensions())
     al = make_anomaly_likelihood(al_period)
 
@@ -266,7 +296,8 @@ def main():
         if bacc > best_bacc:
             best_bacc, best_thresh = bacc, th
     
-    best_f1 = f1_score(all_val_labels, apply_detection(all_val_seqs, 'first_crossing', best_thresh, warmup, labels=all_val_labels), zero_division=0)
+    val_preds = apply_detection(all_val_seqs, 'first_crossing', best_thresh, warmup, labels=all_val_labels)
+    best_f1 = f1_score(all_val_labels, val_preds, zero_division=0)
 
     print("Testing...")
     test_h_sc, test_h_lb, test_h_sq = get_scores(test_human, False)

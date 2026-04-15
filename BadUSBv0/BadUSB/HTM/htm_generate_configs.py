@@ -108,6 +108,9 @@ def write_slurm_script(n_configs: int, out_path: str):
 
 source $(conda info --base)/etc/profile.d/conda.sh
 conda activate htm_keyboard_1
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+
+cd "$SLURM_SUBMIT_DIR"
 
 mapfile -t CONFIGS < <(ls HTM/configs/config_*.json | sort)
 CONFIG="${{CONFIGS[$SLURM_ARRAY_TASK_ID]}}"
@@ -118,7 +121,7 @@ if [[ -z "$CONFIG" ]]; then
 fi
 
 echo "Running HTM training with config: $CONFIG"
-python -u HTM/htm_train.py --config "$CONFIG"
+python -X utf8 -u HTM/htm_train.py --config "$CONFIG"
 """
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, 'w', newline='\n') as fh:
