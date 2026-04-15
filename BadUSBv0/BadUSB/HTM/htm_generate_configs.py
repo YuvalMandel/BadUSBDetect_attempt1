@@ -106,7 +106,8 @@ def write_slurm_script(n_configs: int, out_path: str):
 #SBATCH --mem=8G
 #SBATCH --time=08:00:00
 
-source $(conda info --base)/etc/profile.d/conda.sh
+export PATH="$HOME/miniconda3/bin:$HOME/anaconda3/bin:$PATH"
+source "$HOME/miniconda3/etc/profile.d/conda.sh" 2>/dev/null || source "$HOME/anaconda3/etc/profile.d/conda.sh"
 conda activate htm_keyboard_1
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 
