@@ -30,6 +30,13 @@ echo "ROOT  : $ROOT"
 echo "Start : $(date)"
 echo "========================================"
 
+# ── Step 0: symlink UB dataset s2/ into dataset_generator/ (Newton only) ─────
+UB_S2="$ROOT/../UB_keystroke_dataset/s2"
+if [ ! -e "$DATA/s2" ] && [ -d "$UB_S2" ]; then
+    ln -s "$UB_S2" "$DATA/s2"
+    echo "Created symlink: $DATA/s2 -> $UB_S2"
+fi
+
 # ── Step 1: generate bots + humans (skip if already done) ────────────────────
 if [ ! -d "$DATA/Synthetic_Bots" ]; then
     echo "--- Generating datasets ---"
