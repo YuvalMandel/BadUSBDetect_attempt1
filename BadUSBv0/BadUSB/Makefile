@@ -6,6 +6,7 @@ DATA_DIR = dataset_generator
 MLP_DIR = MLP
 REGRESSOR_DIR = $(MLP_DIR)/regressor
 GRU_DIR = GRU
+HTM_DIR = HTM
 RESULTS_DIR = results
 
 # Folders for generated data
@@ -16,7 +17,7 @@ HUMANS_TEST = $(DATA_DIR)/Balanced_Humans_test
 
 SPLIT_JSON = data_split.json
 
-.PHONY: help generate_dataset split_persons train_mlp train_gru clean_results clean_dataset clean_models clean_all
+.PHONY: help generate_dataset split_persons train_mlp train_gru train_htm test_htm clean_results clean_dataset clean_models clean_all
 
 # ==============================================================================
 # HELP: USER INSTRUCTIONS
@@ -39,10 +40,16 @@ help:
 	@echo "4. Train GRU (Assemble tensors -> Train GRU):"
 	@echo "   make train_gru"
 	@echo ""
+	@echo "5. Train HTM (Prepare data -> Train HTM):"
+	@echo "   make train_htm"
+	@echo ""
+	@echo "6. Test HTM model:"
+	@echo "   make test_htm"
+	@echo ""
 	@echo "----------------------------------------------------------------------"
 	@echo "Cleanup Utilities:"
 	@echo "  make clean_results  - Remove charts (PNG) and reports (CSV) from results"
-	@echo "  make clean_dataset  - Remove generated bot/human data and CSV/PT files"
+	@echo "  make clean_dataset  - Remove generated bot/human data and CSV/PT/PKL files"
 	@echo "  make clean_models   - Remove model weights (.pth, .pkl, .npy, .npz)"
 	@echo "  make clean_all      - Perform full project cleanup"
 	@echo "======================================================================"
@@ -94,6 +101,26 @@ train_gru:
 	@echo "✅ GRU training successfully completed!"
 
 # ==============================================================================
+# HTM TRAINING
+# ==============================================================================
+train_htm:
+	@echo "--- 1. Preparing HTM data (windows_cache.pkl) ---"
+	cd $(HTM_DIR) && $(PYTHON) htm_prepare_data.py
+	@echo "--- 2. Training HTM model ---"
+	cd $(HTM_DIR) && $(PYTHON) htm_train.py
+	@echo "✅ HTM training successfully completed!"
+
+test_htm:
+	@echo "--- Testing HTM model ---"
+	-@LATEST_MODEL=$(shell ls -t $(RESULTS_DIR)/HTM/models/*.pkl 2>/dev/null | head -n 1)
+	@if [ -z "$(LATEST_MODEL)" ]; then \
+		echo "ERROR: No HTM models found in $(RESULTS_DIR)/HTM/models/"; \
+		exit 1; \
+	fi; \
+	echo "Using latest model: $${LATEST_MODEL}"; \
+	$(PYTHON) $(HTM_DIR)/htm_test.py --model "$${LATEST_MODEL}"
+
+# ==============================================================================
 # CLEANUP
 # ==============================================================================
 clean_results:
@@ -111,6 +138,7 @@ clean_dataset:
 	rm -f $(MLP_DIR)/val_dataset.csv
 	rm -f $(MLP_DIR)/test_dataset.csv
 	rm -f $(GRU_DIR)/rnn_dataset.pt
+	rm -f $(HTM_DIR)/windows_cache.pkl
 
 clean_models:
 	@echo "🧹 Cleaning up saved weights and parameters..."
@@ -121,6 +149,7 @@ clean_models:
 	rm -f $(REGRESSOR_DIR)/poly_regressor.pkl
 	rm -f $(GRU_DIR)/gru_model.pth
 	rm -f $(GRU_DIR)/rnn_scaler_params.npy
+	rm -rf $(RESULTS_DIR)/HTM/models/*
 
 clean_all: clean_results clean_dataset clean_models
 	@echo "✨ Full project cleanup complete!"
