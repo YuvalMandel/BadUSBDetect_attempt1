@@ -1,0 +1,292 @@
+import os
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix, accuracy_score, f1_score, classification_report
+
+# --- CONFIGURATION ---
+# dataset_csv_generator.py produces these three files (person-disjoint splits)
+TRAIN_CSV = "train_dataset.csv"
+VAL_CSV   = "val_dataset.csv"
+TEST_CSV  = "test_dataset.csv"
+MODEL_SAVE_PATH = "badusb_model.pth"
+SCALER_SAVE_PATH = "scaler_params.npy"
+
+# Directory to save all PNG plots
+RESULTS_DIR = os.path.join("..", "results", "MLP")
+
+BATCH_SIZE = 32
+LEARNING_RATE = 0.001
+EPOCHS = 50
+INPUT_SIZE = 17 # Number of features (F_Mean ... D_MinW)
+
+# Device setup (GPU if available, otherwise CPU)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
+
+# ==============================================================================
+# 1. DATA PREPARATION
+# ==============================================================================
+class BadUSBDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.float32).unsqueeze(1) # [batch, 1]
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
+def prepare_data():
+    """Load pre-split person-disjoint CSVs produced by dataset_csv_generator.py."""
+    def load_csv(path):
+        if not os.path.exists(path):
+            raise FileNotFoundError(
+                f"{path} not found. Run dataset_csv_generator.py first.")
+        df = pd.read_csv(path)
+        return df.drop("Label", axis=1).values, df["Label"].values
+
+    print("Loading person-disjoint splits...")
+    X_train, y_train = load_csv(TRAIN_CSV)
+    X_val,   y_val   = load_csv(VAL_CSV)
+    X_test,  y_test  = load_csv(TEST_CSV)
+
+    print(f"Dataset sizes:")
+    print(f"  Train: {len(X_train)}")
+    print(f"  Val:   {len(X_val)}")
+    print(f"  Test:  {len(X_test)}")
+
+    # Scale on train, apply to val/test
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_val   = scaler.transform(X_val)
+    X_test  = scaler.transform(X_test)
+
+    np.save(SCALER_SAVE_PATH, [scaler.mean_, scaler.scale_])
+    print("Scaler parameters saved.")
+
+    return (X_train, y_train), (X_val, y_val), (X_test, y_test)
+
+# ==============================================================================
+# 2. MODEL (4 Layers, Fully Connected)
+# ==============================================================================
+class BadUSBClassifier(nn.Module):
+    def __init__(self, input_dim):
+        super(BadUSBClassifier, self).__init__()
+        # 4 layers, narrowing architecture
+        self.layer1 = nn.Linear(input_dim, 64)
+        self.layer2 = nn.Linear(64, 32)
+        self.layer3 = nn.Linear(32, 16)
+        self.output = nn.Linear(16, 1) # Binary output
+
+        self.relu = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
+        
+        # Weight initialization (Xavier Initialization)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.xavier_uniform_(m.weight)
+            m.bias.data.fill_(0.01)
+
+    def forward(self, x):
+        x = self.relu(self.layer1(x))
+        x = self.relu(self.layer2(x))
+        x = self.relu(self.layer3(x))
+        x = self.sigmoid(self.output(x))
+        return x
+
+# ==============================================================================
+# 3. TRAINING FUNCTIONS
+# ==============================================================================
+def calculate_metrics(y_true, y_pred):
+    # Round predictions (0.1 -> 0, 0.9 -> 1)
+    y_pred_tag = torch.round(y_pred)
+    
+    correct_results_sum = (y_pred_tag == y_true).sum().float()
+    acc = correct_results_sum / y_true.shape[0]
+    
+    # Convert to CPU numpy for sklearn metrics
+    y_t = y_true.cpu().detach().numpy()
+    y_p = y_pred_tag.cpu().detach().numpy()
+    f1 = f1_score(y_t, y_p, zero_division=0)
+    
+    return acc, f1
+
+def train_epoch(model, loader, criterion, optimizer):
+    model.train()
+    epoch_loss = 0
+    epoch_acc = 0
+    epoch_f1 = 0
+    
+    for X_batch, y_batch in loader:
+        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        
+        optimizer.zero_grad()
+        y_pred = model(X_batch)
+        
+        loss = criterion(y_pred, y_batch)
+        loss.backward()
+        optimizer.step()
+        
+        acc, f1 = calculate_metrics(y_batch, y_pred)
+        
+        epoch_loss += loss.item()
+        epoch_acc += acc.item()
+        epoch_f1 += f1
+        
+    return epoch_loss / len(loader), epoch_acc / len(loader), epoch_f1 / len(loader)
+
+def evaluate(model, loader, criterion):
+    model.eval()
+    epoch_loss = 0
+    epoch_acc = 0
+    epoch_f1 = 0
+    
+    with torch.no_grad():
+        for X_batch, y_batch in loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+            
+            y_pred = model(X_batch)
+            loss = criterion(y_pred, y_batch)
+            
+            acc, f1 = calculate_metrics(y_batch, y_pred)
+            
+            epoch_loss += loss.item()
+            epoch_acc += acc.item()
+            epoch_f1 += f1
+            
+    return epoch_loss / len(loader), epoch_acc / len(loader), epoch_f1 / len(loader)
+
+# ==============================================================================
+# 4. VISUALIZATION
+# ==============================================================================
+def plot_history(history):
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Loss
+    ax1.plot(history['train_loss'], label='Train Loss')
+    ax1.plot(history['val_loss'], label='Val Loss')
+    ax1.set_title('Loss History')
+    ax1.set_xlabel('Epochs')
+    ax1.set_ylabel('Loss')
+    ax1.legend()
+    ax1.grid(True)
+    
+    # Accuracy
+    ax2.plot(history['train_acc'], label='Train Acc')
+    ax2.plot(history['val_acc'], label='Val Acc')
+    ax2.set_title('Accuracy History')
+    ax2.set_xlabel('Epochs')
+    ax2.set_ylabel('Accuracy')
+    ax2.legend()
+    ax2.grid(True)
+    
+    save_path = os.path.join(RESULTS_DIR, 'training_plot_functions.png')
+    plt.savefig(save_path, bbox_inches='tight')
+    print(f"📊 Saved loss/accuracy plot to: {save_path}")
+    plt.close() # Free memory
+
+def plot_confusion_matrices(model, loaders):
+    model.eval()
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    titles = ["Train Set", "Validation Set", "Test Set"]
+    
+    with torch.no_grad():
+        for i, (loader, title) in enumerate(zip(loaders, titles)):
+            all_preds = []
+            all_labels = []
+            
+            for X_b, y_b in loader:
+                X_b = X_b.to(device)
+                preds = model(X_b)
+                all_preds.extend(torch.round(preds).cpu().numpy())
+                all_labels.extend(y_b.numpy())
+            
+            cm = confusion_matrix(all_labels, all_preds)
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[i], cbar=False)
+            axes[i].set_title(title)
+            axes[i].set_xlabel('Predicted')
+            axes[i].set_ylabel('Actual')
+            axes[i].set_xticklabels(['Human', 'Bot'])
+            axes[i].set_yticklabels(['Human', 'Bot'])
+            
+            # Print report for Test set
+            if title == "Test Set":
+                print(f"\n--- Classification Report for {title} ---")
+                print(classification_report(all_labels, all_preds, target_names=['Human', 'Bot']))
+
+    plt.tight_layout()
+    save_path = os.path.join(RESULTS_DIR, 'training_plot_acc.png')
+    plt.savefig(save_path, bbox_inches='tight')
+    print(f"📊 Saved confusion matrices to: {save_path}")
+    plt.close() # Free memory
+
+# ==============================================================================
+# 5. MAIN
+# ==============================================================================
+def main():
+    # Ensure results directory exists
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    
+    # 1. Data
+    (X_train, y_train), (X_val, y_val), (X_test, y_test) = prepare_data()
+    
+    train_dataset = BadUSBDataset(X_train, y_train)
+    val_dataset = BadUSBDataset(X_val, y_val)
+    test_dataset = BadUSBDataset(X_test, y_test)
+    
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+    
+    # 2. Model
+    model = BadUSBClassifier(INPUT_SIZE).to(device)
+    criterion = nn.BCELoss() # Binary Cross Entropy
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    
+    history = {'train_loss': [], 'train_acc': [], 'val_loss': [], 'val_acc': []}
+    
+    print("\nStarting training...")
+    best_val_loss = float('inf')
+    
+    # 3. Training loop
+    for epoch in range(EPOCHS):
+        train_loss, train_acc, train_f1 = train_epoch(model, train_loader, criterion, optimizer)
+        val_loss, val_acc, val_f1 = evaluate(model, val_loader, criterion)
+        
+        history['train_loss'].append(train_loss)
+        history['train_acc'].append(train_acc)
+        history['val_loss'].append(val_loss)
+        history['val_acc'].append(val_acc)
+        
+        # Save best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), MODEL_SAVE_PATH)
+        
+        print(f"Epoch {epoch+1}/{EPOCHS} | "
+              f"Loss: {train_loss:.4f} (Val: {val_loss:.4f}) | "
+              f"Acc: {train_acc:.4f} (Val: {val_acc:.4f}) | "
+              f"F1: {train_f1:.4f} (Val: {val_f1:.4f})")
+        
+    print(f"\nModel saved to: {MODEL_SAVE_PATH}")
+    
+    # 4. Plots
+    plot_history(history)
+    
+    # 5. Confusion matrices
+    # Load best model version before testing
+    model.load_state_dict(torch.load(MODEL_SAVE_PATH))
+    plot_confusion_matrices(model, [train_loader, val_loader, test_loader])
+
+if __name__ == "__main__":
+    main()

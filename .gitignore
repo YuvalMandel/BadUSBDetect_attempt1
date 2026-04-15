@@ -4,6 +4,7 @@ Readme.pdf
 *.npz
 *.npy
 *.pth
+*.pt
 WhatsApp Image*.jpeg
 .claude/
 build_htm.py
