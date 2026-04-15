@@ -56,16 +56,20 @@ if [ ! -f "$WORK/data_split.json" ]; then
     cd "$ROOT"
 fi
 
-# ── Step 3: train polynomial regressor ───────────────────────────────────────
-echo "--- Training polynomial regressor ---"
+# ── Step 3: train polynomial regressor (skip if pkl already present) ─────────
 cd "$WORK/MLP/regressor"
-python -X utf8 regressor_train.py \
-    -hu "$DATA/Balanced_Humans" \
-    -m  poly_regressor.pkl
-python -X utf8 test_regressor.py \
-    -hu "$DATA/Balanced_Humans_test" \
-    -b  "$DATA/Synthetic_Bots_test" \
-    -m  poly_regressor.pkl
+if [ ! -f "poly_regressor.pkl" ]; then
+    echo "--- Training polynomial regressor ---"
+    python -X utf8 regressor_train.py \
+        -hu "$DATA/Balanced_Humans" \
+        -m  poly_regressor.pkl
+    python -X utf8 test_regressor.py \
+        -hu "$DATA/Balanced_Humans_test" \
+        -b  "$DATA/Synthetic_Bots_test" \
+        -m  poly_regressor.pkl
+else
+    echo "--- Skipping regressor training (poly_regressor.pkl already exists) ---"
+fi
 cp poly_regressor.pkl "$WORK/MLP/poly_regressor.pkl"
 
 # ── Step 4: feature extraction → 3 CSVs ──────────────────────────────────────
