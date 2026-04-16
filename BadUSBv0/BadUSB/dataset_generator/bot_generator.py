@@ -84,21 +84,56 @@ def generate_burst_mode(num_events):
     """Batch input: fast typing burst, pause, fast typing burst again."""
     dwells = []
     flights = []
-    
+
     while len(dwells) < num_events:
         burst_size = random.randint(10, 30) # Length of "queue"
         pause_time = random.randint(200, 1000) # Pause between queues
-        
+
         for _ in range(burst_size):
             dwells.append(random.randint(5, 15))
             flights.append(random.randint(5, 15))
-        
+
         # Replace the last flight time with a long pause
         if len(flights) > 0:
             flights[-1] = pause_time
-            
+
     # Trim to required length
     return np.array(dwells[:num_events]), np.array(flights[:num_events])
+
+def generate_slow_typer(num_events):
+    """Hunt-and-peck style: very slow with high variance."""
+    mean_d = random.randint(200, 500)
+    std_d  = random.randint(80, 200)
+    mean_f = random.randint(300, 900)
+    std_f  = random.randint(100, 400)
+    dwells  = np.clip(np.random.normal(mean_d, std_d, num_events), 30, None)
+    flights = np.clip(np.random.normal(mean_f, std_f, num_events), 30, None)
+    return dwells, flights
+
+def generate_bimodal(num_events):
+    """Two-speed mix: 60% fast keystrokes (familiar keys), 40% slow (unfamiliar)."""
+    fast_d = random.randint(40, 80);   slow_d = random.randint(150, 350)
+    fast_f = random.randint(50, 100);  slow_f = random.randint(200, 600)
+    mask    = np.random.random(num_events) < 0.6
+    dwells  = np.where(mask,
+                       np.random.normal(fast_d, 8,  num_events),
+                       np.random.normal(slow_d, 40, num_events))
+    flights = np.where(mask,
+                       np.random.normal(fast_f, 12, num_events),
+                       np.random.normal(slow_f, 60, num_events))
+    return np.clip(dwells, 1, None), np.clip(flights, 1, None)
+
+def generate_periodic_rhythm(num_events):
+    """Mechanical rhythm: sinusoidal modulation on flight times."""
+    base_d    = random.randint(8, 20)
+    base_f    = random.randint(10, 30)
+    period    = random.randint(4, 12)
+    amplitude = random.uniform(0.3, 0.7) * base_f
+    t = np.arange(num_events)
+    dwells  = np.clip(base_d + np.random.normal(0, 1, num_events), 1, None)
+    flights = np.clip(base_f + amplitude * np.sin(2 * np.pi * t / period)
+                      + np.random.normal(0, 2, num_events), 1, None)
+    return dwells, flights
 
 # ==============================================================================
 # MAIN
@@ -111,8 +146,8 @@ def main():
                         help="Directory to save the generated files (default: Synthetic_Bots)")
     parser.add_argument("-f", "--files_per_type", type=int, default=100, 
                         help="Number of files to generate per attack type (default: 100)")
-    parser.add_argument("-e", "--events_per_file", type=int, default=80, 
-                        help="Number of key press events per file (default: 80)")
+    parser.add_argument("-e", "--events_per_file", type=int, default=200,
+                        help="Number of key press events per file (default: 200)")
     
     args = parser.parse_args()
 
@@ -120,11 +155,14 @@ def main():
     create_dir(args.output_dir)
     
     attack_types = {
-        "Machine_Gun": generate_machine_gun,
-        "The_Robot": generate_the_robot,
-        "Gaussian_Faker": generate_gaussian_faker,
-        "Uniform_Jitter": generate_uniform_jitter,
-        "Burst_Mode": generate_burst_mode
+        "Machine_Gun":      generate_machine_gun,
+        "The_Robot":        generate_the_robot,
+        "Gaussian_Faker":   generate_gaussian_faker,
+        "Uniform_Jitter":   generate_uniform_jitter,
+        "Burst_Mode":       generate_burst_mode,
+        "Slow_Typer":       generate_slow_typer,
+        "Bimodal":          generate_bimodal,
+        "Periodic_Rhythm":  generate_periodic_rhythm,
     }
     
     total_files = 0

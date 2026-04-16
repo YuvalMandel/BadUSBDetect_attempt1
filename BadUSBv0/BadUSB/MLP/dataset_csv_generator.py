@@ -165,7 +165,8 @@ COLS = [
     "Label"
 ]
 
-def process_split(split_name, human_files, bot_files, ref_d, ref_f, poly_model, max_workers):
+def process_split(split_name, human_files, bot_files, ref_d, ref_f, poly_model,
+                  max_workers, mode="partial"):
     tasks = (
         [(f, 0, STEP_SIZE_HUMAN, ref_d, ref_f, poly_model) for f in human_files] +
         [(f, 1, STEP_SIZE_BOT,   ref_d, ref_f, poly_model) for f in bot_files]
@@ -184,13 +185,19 @@ def process_split(split_name, human_files, bot_files, ref_d, ref_f, poly_model, 
 
     humans_r = [r for r in rows if r[-1] == 0]
     bots_r   = [r for r in rows if r[-1] == 1]
-    n = min(len(humans_r), len(bots_r))
-    balanced = random.sample(humans_r, n) + random.sample(bots_r, n)
+
+    if mode == "partial":
+        n = min(len(humans_r), len(bots_r))
+        balanced = random.sample(humans_r, n) + random.sample(bots_r, n)
+        balance_note = f"→ {len(balanced)} balanced rows"
+    else:  # full: all windows, no undersampling
+        balanced = humans_r + bots_r
+        balance_note = f"→ {len(balanced)} rows (imbalanced, use class weights)"
 
     df = pd.DataFrame(balanced, columns=COLS).sample(frac=1).reset_index(drop=True)
     out_csv = f"{split_name}_dataset.csv"
     df.to_csv(out_csv, index=False)
-    print(f"  Saved {out_csv}  ({len(humans_r)} human / {len(bots_r)} bot windows → {len(df)} balanced rows)")
+    print(f"  Saved {out_csv}  ({len(humans_r)} human / {len(bots_r)} bot windows {balance_note})")
     return df
 
 # ==============================================================================
@@ -200,6 +207,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--split-json", default="../data_split.json",
                         help="Path to data_split.json (default: ../data_split.json)")
+    parser.add_argument("--mode", choices=["partial", "full"], default="partial",
+                        help="'partial' (default): balance by undersampling majority class. "
+                             "'full': all windows, imbalanced — training scripts use class weights.")
     args = parser.parse_args()
 
     # Load split manifest
@@ -227,13 +237,14 @@ def main():
     max_workers = max(1, multiprocessing.cpu_count() - 1)
     print(f"\n--- 3. Feature extraction  (workers={max_workers}) ---")
 
+    print(f"\nMode: {args.mode}")
     for name in ("train", "val", "test"):
         print(f"\n[{name}]  humans={len(split[name]['humans'])}, "
               f"bots={len(split[name]['bots'])}")
         process_split(name,
                       split[name]["humans"],
                       split[name]["bots"],
-                      ref_d, ref_f, poly_model, max_workers)
+                      ref_d, ref_f, poly_model, max_workers, mode=args.mode)
 
     print("\nDone. Files created: train_dataset.csv, val_dataset.csv, test_dataset.csv")
 

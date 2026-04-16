@@ -75,6 +75,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--split-json", default="../data_split.json",
                         help="Path to data_split.json (default: ../data_split.json)")
+    parser.add_argument("--mode", choices=["partial", "full"], default="partial",
+                        help="'partial' (default): balance by undersampling. "
+                             "'full': all windows, imbalanced — training script uses class weights.")
     args = parser.parse_args()
 
     split_json = os.path.abspath(args.split_json)
@@ -97,19 +100,26 @@ def main():
 
         print(f"  Windows: humans={len(human_seqs)}, bots={len(bot_seqs)}")
 
-        # Balance by undersampling majority
-        n = min(len(human_seqs), len(bot_seqs))
-        if n == 0:
-            print(f"  WARNING: empty split '{name}', skipping.")
-            continue
+        if args.mode == "partial":
+            n = min(len(human_seqs), len(bot_seqs))
+            if n == 0:
+                print(f"  WARNING: empty split '{name}', skipping.")
+                continue
+            import random
+            random.seed(42)
+            h_use = random.sample(human_seqs, n)
+            b_use = random.sample(bot_seqs,   n)
+            print(f"  Partial mode: balanced to {n} per class")
+        else:  # full
+            if len(human_seqs) == 0 or len(bot_seqs) == 0:
+                print(f"  WARNING: empty split '{name}', skipping.")
+                continue
+            h_use = human_seqs
+            b_use = bot_seqs
+            print(f"  Full mode: {len(h_use)} human + {len(b_use)} bot windows (imbalanced)")
 
-        import random
-        random.seed(42)
-        h_bal = random.sample(human_seqs, n)
-        b_bal = random.sample(bot_seqs,   n)
-
-        X = np.array(h_bal + b_bal)          # (2n, 15, 2)
-        y = np.concatenate([np.zeros(n), np.ones(n)])
+        X = np.array(h_use + b_use)
+        y = np.concatenate([np.zeros(len(h_use)), np.ones(len(b_use))])
 
         # Shuffle
         idx = np.random.default_rng(42).permutation(len(X))
