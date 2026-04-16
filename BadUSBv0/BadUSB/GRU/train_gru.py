@@ -130,8 +130,10 @@ def hp_search(X_train, y_train, X_val, y_val, n_trials, pos_weight):
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     criterion  = WeightedBCELoss(pos_weight)
     val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=512)
+    n_jobs = max(1, min(n_trials, (os.cpu_count() or 1) // 2))
 
     def objective(trial):
+        torch.set_num_threads(1)  # prevent over-subscription with parallel trials
         hidden_dim = trial.suggest_categorical("hidden_dim", [32, 64, 128, 256])
         num_layers = trial.suggest_int("num_layers", 1, 2)
         dropout    = trial.suggest_float("dropout",    0.0,  0.4, step=0.05)
@@ -158,7 +160,8 @@ def hp_search(X_train, y_train, X_val, y_val, n_trials, pos_weight):
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=42)
     )
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    print(f"  Parallel trials: n_jobs={n_jobs} (CPUs={os.cpu_count()})")
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=False)
 
     bp = study.best_params
     print(f"\nHP search done — best val F1: {study.best_value:.4f}")

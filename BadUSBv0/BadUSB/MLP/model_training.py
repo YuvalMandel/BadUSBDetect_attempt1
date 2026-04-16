@@ -175,7 +175,10 @@ def hp_search(X_train, y_train, X_val, y_val, n_trials, pos_weight):
     criterion = WeightedBCELoss(pos_weight)
     val_loader = DataLoader(BadUSBDataset(X_val, y_val), batch_size=512)
 
+    n_jobs = max(1, min(n_trials, (os.cpu_count() or 1) // 2))
+
     def objective(trial):
+        torch.set_num_threads(1)  # prevent over-subscription with parallel trials
         n_hidden    = trial.suggest_int("n_hidden", 1, 3)
         # Always suggest 3 layer widths; use only the first n_hidden
         all_widths  = [trial.suggest_categorical(f"h{i}", [32, 64, 128, 256]) for i in range(3)]
@@ -204,7 +207,8 @@ def hp_search(X_train, y_train, X_val, y_val, n_trials, pos_weight):
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=42)
     )
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    print(f"  Parallel trials: n_jobs={n_jobs} (CPUs={os.cpu_count()})")
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=False)
 
     bp = study.best_params
     print(f"\nHP search done — best val F1: {study.best_value:.4f}")
