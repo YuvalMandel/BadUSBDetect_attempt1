@@ -1,4 +1,6 @@
 import os
+import sys
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -178,9 +180,79 @@ def plot_confusion_matrices(model, loaders):
     plt.close() # Free memory
 
 # ==============================================================================
-# 4. MAIN
+# 4. FILE-LEVEL EVALUATION
+# ==============================================================================
+def evaluate_file_level(model, split_json_path):
+    """Window-level + file-level (first-crossing) F1 on raw unbalanced test files."""
+    import json
+    _gru_dir = os.path.dirname(os.path.abspath(__file__))
+    if _gru_dir not in sys.path:
+        sys.path.insert(0, _gru_dir)
+    from translate_to_tensors import parse_file, SEQ_LEN, STEP_SIZE
+
+    if not os.path.exists(split_json_path):
+        print(f"  [file-level] split JSON not found: {split_json_path}")
+        return
+    with open(split_json_path) as fh:
+        split = json.load(fh)
+
+    try:
+        scaler_params = np.load("rnn_scaler_params.npy", allow_pickle=True)
+        mean, scale = scaler_params[0], scaler_params[1]
+    except Exception as e:
+        print(f"  [file-level] Cannot load rnn_scaler_params.npy: {e}")
+        return
+
+    model.eval()
+    file_labels, file_preds = [], []
+    win_labels,  win_preds  = [], []
+
+    with torch.no_grad():
+        for is_bot, file_list in [(0, split['test']['humans']),
+                                  (1, split['test']['bots'])]:
+            for fp in file_list:
+                d, f = parse_file(fp)
+                if len(d) < SEQ_LEN:
+                    continue
+                file_win_scores = []
+                for i in range(0, len(d) - SEQ_LEN, STEP_SIZE):
+                    seq = np.column_stack((d[i:i+SEQ_LEN], f[i:i+SEQ_LEN]))
+                    seq = (seq - mean) / scale
+                    x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(device)
+                    prob = model(x).item()
+                    file_win_scores.append(prob)
+                    win_labels.append(is_bot)
+                    win_preds.append(1 if prob >= 0.5 else 0)
+                if not file_win_scores:
+                    continue
+                file_pred = 1 if any(s >= 0.5 for s in file_win_scores) else 0
+                file_labels.append(is_bot)
+                file_preds.append(file_pred)
+
+    if not file_labels:
+        print("  [file-level] No test files processed.")
+        return
+
+    n_human = sum(1 for l in file_labels if l == 0)
+    n_bot   = sum(1 for l in file_labels if l == 1)
+    win_f1  = f1_score(win_labels,  win_preds,  zero_division=0)
+    file_f1 = f1_score(file_labels, file_preds, zero_division=0)
+
+    print(f"\n=== GRU WINDOW-LEVEL F1 (test, unbalanced, all files) ===")
+    print(f"  F1: {win_f1:.4f}   ({len(win_labels)} windows)")
+    print(f"=== GRU FILE-LEVEL F1 (test, first_crossing) ===")
+    print(f"  F1: {file_f1:.4f}   ({n_human} human + {n_bot} bot files)")
+
+
+# ==============================================================================
+# 5. MAIN
 # ==============================================================================
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--split-json", default="../data_split.json",
+                        help="Path to data_split.json for file-level evaluation")
+    args = parser.parse_args()
+
     # Ensure results directory exists
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -234,6 +306,9 @@ def main():
     # Load best weights for final testing
     model.load_state_dict(torch.load(MODEL_SAVE_PATH))
     plot_confusion_matrices(model, [train_loader, val_loader, test_loader])
+
+    # 4. File-level + window-level evaluation on raw test files
+    evaluate_file_level(model, args.split_json)
 
 if __name__ == "__main__":
     main()

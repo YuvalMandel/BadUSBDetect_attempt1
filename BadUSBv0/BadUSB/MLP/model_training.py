@@ -1,4 +1,6 @@
 import os
+import sys
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -76,7 +78,7 @@ def prepare_data():
     np.save(SCALER_SAVE_PATH, [scaler.mean_, scaler.scale_])
     print("Scaler parameters saved.")
 
-    return (X_train, y_train), (X_val, y_val), (X_test, y_test)
+    return (X_train, y_train), (X_val, y_val), (X_test, y_test), scaler
 
 # ==============================================================================
 # 2. MODEL (4 Layers, Fully Connected)
@@ -235,14 +237,96 @@ def plot_confusion_matrices(model, loaders):
     plt.close() # Free memory
 
 # ==============================================================================
-# 5. MAIN
+# 5. FILE-LEVEL EVALUATION
+# ==============================================================================
+def evaluate_file_level(model, scaler, split_json_path):
+    """Window-level + file-level (first-crossing) F1 on raw unbalanced test files."""
+    import json, joblib
+    _mlp_dir = os.path.dirname(os.path.abspath(__file__))
+    if _mlp_dir not in sys.path:
+        sys.path.insert(0, _mlp_dir)
+    from dataset_csv_generator import (parse_file, extract_features,
+                                       WINDOW_SIZE, STEP_SIZE_HUMAN)
+
+    if not os.path.exists(split_json_path):
+        print(f"  [file-level] split JSON not found: {split_json_path}")
+        return
+    with open(split_json_path) as fh:
+        split = json.load(fh)
+
+    try:
+        poly_model = joblib.load("poly_regressor.pkl")
+    except Exception as e:
+        print(f"  [file-level] Cannot load poly_regressor.pkl: {e}")
+        return
+
+    try:
+        refs = np.load("reference_pool.npz", allow_pickle=True)
+        ref_d = list(refs['dwell'])
+        ref_f = list(refs['flight'])
+    except Exception as e:
+        print(f"  [file-level] Cannot load reference_pool.npz: {e}")
+        return
+
+    model.eval()
+    file_labels, file_preds = [], []
+    win_labels,  win_preds  = [], []
+
+    with torch.no_grad():
+        for is_bot, file_list in [(0, split['test']['humans']),
+                                  (1, split['test']['bots'])]:
+            for fp in file_list:
+                d, f_det = parse_file(fp)
+                min_len = min(len(d), len(f_det))
+                if min_len < WINDOW_SIZE:
+                    continue
+                file_win_scores = []
+                for i in range(0, min_len - WINDOW_SIZE, STEP_SIZE_HUMAN):
+                    feats = extract_features(d[i:i+WINDOW_SIZE],
+                                             f_det[i:i+WINDOW_SIZE],
+                                             ref_d, ref_f, poly_model)
+                    if feats is None:
+                        continue
+                    x = scaler.transform([feats])
+                    prob = model(torch.tensor(x, dtype=torch.float32).to(device)).item()
+                    file_win_scores.append(prob)
+                    win_labels.append(is_bot)
+                    win_preds.append(1 if prob >= 0.5 else 0)
+                if not file_win_scores:
+                    continue
+                file_pred = 1 if any(s >= 0.5 for s in file_win_scores) else 0
+                file_labels.append(is_bot)
+                file_preds.append(file_pred)
+
+    if not file_labels:
+        print("  [file-level] No test files processed.")
+        return
+
+    n_human = sum(1 for l in file_labels if l == 0)
+    n_bot   = sum(1 for l in file_labels if l == 1)
+    win_f1  = f1_score(win_labels,  win_preds,  zero_division=0)
+    file_f1 = f1_score(file_labels, file_preds, zero_division=0)
+
+    print(f"\n=== MLP WINDOW-LEVEL F1 (test, unbalanced, all files) ===")
+    print(f"  F1: {win_f1:.4f}   ({len(win_labels)} windows)")
+    print(f"=== MLP FILE-LEVEL F1 (test, first_crossing) ===")
+    print(f"  F1: {file_f1:.4f}   ({n_human} human + {n_bot} bot files)")
+
+
+# ==============================================================================
+# 6. MAIN
 # ==============================================================================
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--split-json", default="../data_split.json",
+                        help="Path to data_split.json for file-level evaluation")
+    args = parser.parse_args()
+
     # Ensure results directory exists
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    
+
     # 1. Data
-    (X_train, y_train), (X_val, y_val), (X_test, y_test) = prepare_data()
+    (X_train, y_train), (X_val, y_val), (X_test, y_test), scaler = prepare_data()
     
     train_dataset = BadUSBDataset(X_train, y_train)
     val_dataset = BadUSBDataset(X_val, y_val)
@@ -291,6 +375,9 @@ def main():
     # Load best model version before testing
     model.load_state_dict(torch.load(MODEL_SAVE_PATH))
     plot_confusion_matrices(model, [train_loader, val_loader, test_loader])
+
+    # 6. File-level + window-level evaluation on raw test files
+    evaluate_file_level(model, scaler, args.split_json)
 
 if __name__ == "__main__":
     main()

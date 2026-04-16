@@ -35,18 +35,19 @@ def load_results() -> list:
     return records
 
 def format_row(rank: int, r: dict) -> str:
-    cfg = r.get("config", {})
     val_bacc = r.get("val_bacc", float("nan"))
     bacc_str = f"{val_bacc:.4f}" if val_bacc == val_bacc else "  N/A "
     live_thresh = r.get("live_thresh", None)
     lt_str = f"{live_thresh:.4f}" if live_thresh is not None and live_thresh > 0 else "  ---  "
-    
+    vwf = r.get("val_win_f1");  vwf_str = f"{vwf:.4f}" if vwf is not None else " N/A  "
+    twf = r.get("test_win_f1"); twf_str = f"{twf:.4f}" if twf is not None else " N/A  "
+
     return (
         f"{rank:>4}  "
         f"cfg_{r.get('config_idx', 0):04d}  "
         f"{bacc_str}  "
-        f"{r.get('val_f1', 0):.4f}   "
-        f"{r.get('test_f1', 0):.4f}   "
+        f"vF={r.get('val_f1', 0):.4f}/wF={vwf_str}  "
+        f"tF={r.get('test_f1', 0):.4f}/wF={twf_str}  "
         f"{r.get('best_thresh', 0):.4f}  "
         f"lt={lt_str}"
     )
@@ -69,8 +70,9 @@ def main():
     total = len(records)
     show = min(args.top, total)
 
-    header = (f"{'Rank':>4}  {'Config':>9}  {'ValBAcc':>7}  {'Val F1':>7}   "
-              f"{'Test F1':>7}   {'Thresh':>7}  {'LiveThresh':>10}")
+    header = (f"{'Rank':>4}  {'Config':>9}  {'ValBAcc':>7}  "
+              f"{'Val File-F1/Win-F1':>22}  {'Test File-F1/Win-F1':>23}  "
+              f"{'Thresh':>7}  {'LiveThresh':>10}")
     lines = ["=" * 80, f"HTM Hyperparameter Search -- {total} completed runs", "=" * 80, header, "-" * 80]
 
     for rank, r in enumerate(records[:show], 1):
@@ -97,7 +99,7 @@ def main():
 
     csv_path = os.path.join(LEADERBOARD_DIR, "leaderboard.csv")
     all_cfg_keys = sorted(list(set(k for r in records for k in r.get("config", {}).keys())))
-    fieldnames = ["rank", "config_idx", "val_bacc", "val_f1", "test_f1", "best_thresh", "live_thresh"] + all_cfg_keys
+    fieldnames = ["rank", "config_idx", "val_bacc", "val_f1", "val_win_f1", "test_f1", "test_win_f1", "best_thresh", "live_thresh"] + all_cfg_keys
     
     with open(csv_path, 'w', newline='') as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames, extrasaction='ignore')

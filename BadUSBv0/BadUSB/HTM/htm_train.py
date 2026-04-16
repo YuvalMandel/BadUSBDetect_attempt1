@@ -308,7 +308,24 @@ def main():
     test_preds = apply_detection(all_test_seqs, 'first_crossing', best_thresh, warmup, labels=all_test_labels)
     test_f1 = f1_score(all_test_labels, test_preds, zero_division=0)
 
-    print(f"\nVal BAcc={best_bacc:.4f} (thresh={best_thresh:.4f}) | Val F1={best_f1:.4f} | Test F1={test_f1:.4f}")
+    # Window-level F1 (each post-warmup window scored independently at best_thresh)
+    def _win_f1(seqs_h, seqs_b, thr):
+        wl, wp = [], []
+        for seq in seqs_h:
+            for s in seq[warmup:]:
+                wl.append(0); wp.append(1 if s >= thr else 0)
+        for seq in seqs_b:
+            for s in seq[warmup:]:
+                wl.append(1); wp.append(1 if s >= thr else 0)
+        if not wl:
+            return 0.0, 0
+        return f1_score(wl, wp, zero_division=0), len(wl)
+
+    val_win_f1,  val_n_wins  = _win_f1(val_h_sq,  val_b_sq,  best_thresh)
+    test_win_f1, test_n_wins = _win_f1(test_h_sq, test_b_sq, best_thresh)
+
+    print(f"\nVal  BAcc={best_bacc:.4f} thresh={best_thresh:.4f} | File-F1={best_f1:.4f} | Win-F1={val_win_f1:.4f} ({val_n_wins} wins)")
+    print(f"Test                              | File-F1={test_f1:.4f}  | Win-F1={test_win_f1:.4f} ({test_n_wins} wins)")
     
     fname_slug = f"htm_model_{config_idx:04d}_vf1{best_f1:.4f}_tf1{test_f1:.4f}"
     model_path = os.path.join(MODELS_DIR, f"{fname_slug}.pkl")
@@ -319,7 +336,9 @@ def main():
             "detection_mode": "first_crossing", "warmup_steps": warmup, "al_period": al_period,
             "window_size": window_size, "window_step": window_step,
             "ref_dwells": wcache['ref_dwells'], "ref_flights": wcache['ref_flights'], "ref_dists": wcache['ref_dists'],
-            "config": cfg, "config_idx": config_idx, "val_bacc": float(best_bacc), "val_f1": float(best_f1), "test_f1": float(test_f1),
+            "config": cfg, "config_idx": config_idx, "val_bacc": float(best_bacc),
+            "val_f1": float(best_f1), "val_win_f1": float(val_win_f1),
+            "test_f1": float(test_f1), "test_win_f1": float(test_win_f1),
         }, fh)
     print(f"  Model -> {model_path}")
     
@@ -328,7 +347,9 @@ def main():
         "config": cfg,
         "val_bacc": float(best_bacc),
         "val_f1": float(best_f1),
+        "val_win_f1": float(val_win_f1),
         "test_f1": float(test_f1),
+        "test_win_f1": float(test_win_f1),
         "best_thresh": float(best_thresh),
         "live_thresh": float(best_thresh),
         "model_file": model_path,
@@ -338,7 +359,9 @@ def main():
         json.dump(result, fh, indent=2)
     print(f"  Result-> {results_path}")
 
-    title = f"HTM Config {config_idx:04d} | Val BAcc={best_bacc:.4f} F1={best_f1:.4f} | Test F1={test_f1:.4f}"
+    title = (f"HTM Config {config_idx:04d} | Val BAcc={best_bacc:.4f} "
+             f"File-F1={best_f1:.4f} Win-F1={val_win_f1:.4f} | "
+             f"Test File-F1={test_f1:.4f} Win-F1={test_win_f1:.4f}")
     plot_results(val_h_sq, val_b_sq, val_h_sc, val_b_sc, all_val_seqs, all_val_labels, best_thresh, best_bacc, fname_slug, title, warmup)
     plot_confusion(all_val_labels, val_preds, all_test_labels, test_preds, fname_slug, title)
 
