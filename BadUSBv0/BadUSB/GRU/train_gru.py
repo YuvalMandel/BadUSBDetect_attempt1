@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import confusion_matrix, f1_score, classification_report
@@ -183,7 +185,8 @@ def plot_confusion_matrices(model, loaders):
 # 4. FILE-LEVEL EVALUATION
 # ==============================================================================
 def evaluate_file_level(model, split_json_path):
-    """Window-level + file-level (first-crossing) F1 on raw unbalanced test files."""
+    """Window-level + file-level (first-crossing) F1 on raw unbalanced files, all splits.
+    Plots a 2×3 confusion matrix figure (rows: window/file, cols: train/val/test)."""
     import json
     _gru_dir = os.path.dirname(os.path.abspath(__file__))
     if _gru_dir not in sys.path:
@@ -204,44 +207,71 @@ def evaluate_file_level(model, split_json_path):
         return
 
     model.eval()
-    file_labels, file_preds = [], []
-    win_labels,  win_preds  = [], []
+    split_names = ["train", "val", "test"]
+    results = {}
 
+    print("\n=== GRU File-level + Window-level evaluation (all splits) ===")
     with torch.no_grad():
-        for is_bot, file_list in [(0, split['test']['humans']),
-                                  (1, split['test']['bots'])]:
-            for fp in file_list:
-                d, f = parse_file(fp)
-                if len(d) < SEQ_LEN:
-                    continue
-                file_win_scores = []
-                for i in range(0, len(d) - SEQ_LEN, STEP_SIZE):
-                    seq = np.column_stack((d[i:i+SEQ_LEN], f[i:i+SEQ_LEN]))
-                    seq = (seq - mean) / scale
-                    x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(device)
-                    prob = model(x).item()
-                    file_win_scores.append(prob)
-                    win_labels.append(is_bot)
-                    win_preds.append(1 if prob >= 0.5 else 0)
-                if not file_win_scores:
-                    continue
-                file_pred = 1 if any(s >= 0.5 for s in file_win_scores) else 0
-                file_labels.append(is_bot)
-                file_preds.append(file_pred)
+        for split_name in split_names:
+            file_labels, file_preds = [], []
+            win_labels,  win_preds  = [], []
 
-    if not file_labels:
-        print("  [file-level] No test files processed.")
-        return
+            for is_bot, file_list in [(0, split[split_name]['humans']),
+                                      (1, split[split_name]['bots'])]:
+                for fp in file_list:
+                    d, f = parse_file(fp)
+                    if len(d) < SEQ_LEN:
+                        continue
+                    file_win_scores = []
+                    for i in range(0, len(d) - SEQ_LEN, STEP_SIZE):
+                        seq = np.column_stack((d[i:i+SEQ_LEN], f[i:i+SEQ_LEN]))
+                        seq = (seq - mean) / scale
+                        x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(device)
+                        prob = model(x).item()
+                        file_win_scores.append(prob)
+                        win_labels.append(is_bot)
+                        win_preds.append(1 if prob >= 0.5 else 0)
+                    if not file_win_scores:
+                        continue
+                    file_pred = 1 if any(s >= 0.5 for s in file_win_scores) else 0
+                    file_labels.append(is_bot)
+                    file_preds.append(file_pred)
 
-    n_human = sum(1 for l in file_labels if l == 0)
-    n_bot   = sum(1 for l in file_labels if l == 1)
-    win_f1  = f1_score(win_labels,  win_preds,  zero_division=0)
-    file_f1 = f1_score(file_labels, file_preds, zero_division=0)
+            results[split_name] = {
+                'win_labels': win_labels, 'win_preds': win_preds,
+                'file_labels': file_labels, 'file_preds': file_preds,
+            }
+            if file_labels:
+                win_f1  = f1_score(win_labels,  win_preds,  zero_division=0)
+                file_f1 = f1_score(file_labels, file_preds, zero_division=0)
+                print(f"  {split_name.upper():5s}: Win-F1={win_f1:.4f} ({len(win_labels)} windows) | "
+                      f"File-F1={file_f1:.4f} ({len(file_labels)} files)")
 
-    print(f"\n=== GRU WINDOW-LEVEL F1 (test, unbalanced, all files) ===")
-    print(f"  F1: {win_f1:.4f}   ({len(win_labels)} windows)")
-    print(f"=== GRU FILE-LEVEL F1 (test, first_crossing) ===")
-    print(f"  F1: {file_f1:.4f}   ({n_human} human + {n_bot} bot files)")
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig.suptitle("GRU — All Splits Confusion Matrices (Window-level / File-level)", fontsize=14)
+
+    for col, split_name in enumerate(split_names):
+        res = results[split_name]
+        for row, (labels, preds, row_title) in enumerate([
+            (res['win_labels'],  res['win_preds'],  "Window-level"),
+            (res['file_labels'], res['file_preds'], "File-level (first_crossing)"),
+        ]):
+            ax = axes[row, col]
+            if labels:
+                sns.heatmap(confusion_matrix(labels, preds), annot=True, fmt='d',
+                            cmap='Purples', ax=ax, cbar=False)
+            ax.set_title(f"{split_name.capitalize()} — {row_title}\n"
+                         f"F1={f1_score(labels, preds, zero_division=0):.4f}")
+            ax.set_xlabel('Predicted')
+            ax.set_ylabel('Actual')
+            ax.set_xticklabels(['Human', 'Bot'])
+            ax.set_yticklabels(['Human', 'Bot'])
+
+    plt.tight_layout()
+    save_path = os.path.join(RESULTS_DIR, 'gru_all_splits_confusion.png')
+    plt.savefig(save_path, dpi=120, bbox_inches='tight')
+    print(f"Confusion matrices -> {save_path}")
+    plt.close()
 
 
 # ==============================================================================

@@ -105,19 +105,23 @@ def plot_results(val_h_seqs, val_b_seqs, val_h_scores, val_b_scores,
     plt.close()
     print(f"  Plot  -> {fpath}")
 
-def plot_confusion(val_labels, val_preds, test_labels, test_preds, fname_slug, title):
+def plot_confusion(val_file_labels, val_file_preds, val_win_labels, val_win_preds, fname_slug, title):
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle(title, fontsize=9)
-    
-    for ax, (labels, preds, subset) in zip(axes, [(val_labels, val_preds, "Validation Set"), (test_labels, test_preds, "Test Set")]):
+
+    for ax, (labels, preds, subset) in zip(axes, [
+        (val_file_labels, val_file_preds, "Val — File-level (first_crossing)"),
+        (val_win_labels,  val_win_preds,  "Val — Window-level"),
+    ]):
         cm = confusion_matrix(labels, preds)
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax, cbar=False)
-        ax.set_title(subset)
+        f1 = f1_score(labels, preds, zero_division=0)
+        ax.set_title(f"{subset}\nF1={f1:.4f}")
         ax.set_xlabel('Predicted')
         ax.set_ylabel('Actual')
         ax.set_xticklabels(['Human', 'Bot'])
         ax.set_yticklabels(['Human', 'Bot'])
-        
+
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     fpath = os.path.join(PLOTS_DIR, f"{fname_slug}_confusion.png")
     plt.savefig(fpath, dpi=120, bbox_inches='tight')
@@ -187,8 +191,6 @@ def main():
     train_human = split['train']['humans']
     val_human = split['val']['humans']
     val_bots = split['val']['bots']
-    test_human = split['test']['humans']
-    test_bots = split['test']['bots']
 
     print("Loading training sequences from cache...")
     train_seqs = {fp: wcache['sequences'][fp] for fp in train_human if fp in wcache['sequences']}
@@ -300,34 +302,19 @@ def main():
     val_preds = apply_detection(all_val_seqs, 'first_crossing', best_thresh, warmup, labels=all_val_labels)
     best_f1 = f1_score(all_val_labels, val_preds, zero_division=0)
 
-    print("Testing...")
-    test_h_sc, test_h_lb, test_h_sq = get_scores(test_human, False)
-    test_b_sc, test_b_lb, test_b_sq = get_scores(test_bots, True)
-    all_test_seqs = test_h_sq + test_b_sq
-    all_test_labels = test_h_lb + test_b_lb
-    test_preds = apply_detection(all_test_seqs, 'first_crossing', best_thresh, warmup, labels=all_test_labels)
-    test_f1 = f1_score(all_test_labels, test_preds, zero_division=0)
+    # Window-level val only — test is NOT evaluated during HP search
+    val_win_labels, val_win_preds = [], []
+    for seq in val_h_sq:
+        for s in seq[warmup:]:
+            val_win_labels.append(0); val_win_preds.append(1 if s >= best_thresh else 0)
+    for seq in val_b_sq:
+        for s in seq[warmup:]:
+            val_win_labels.append(1); val_win_preds.append(1 if s >= best_thresh else 0)
+    val_win_f1 = f1_score(val_win_labels, val_win_preds, zero_division=0)
 
-    # Window-level F1 (each post-warmup window scored independently at best_thresh)
-    def _win_f1(seqs_h, seqs_b, thr):
-        wl, wp = [], []
-        for seq in seqs_h:
-            for s in seq[warmup:]:
-                wl.append(0); wp.append(1 if s >= thr else 0)
-        for seq in seqs_b:
-            for s in seq[warmup:]:
-                wl.append(1); wp.append(1 if s >= thr else 0)
-        if not wl:
-            return 0.0, 0
-        return f1_score(wl, wp, zero_division=0), len(wl)
-
-    val_win_f1,  val_n_wins  = _win_f1(val_h_sq,  val_b_sq,  best_thresh)
-    test_win_f1, test_n_wins = _win_f1(test_h_sq, test_b_sq, best_thresh)
-
-    print(f"\nVal  BAcc={best_bacc:.4f} thresh={best_thresh:.4f} | File-F1={best_f1:.4f} | Win-F1={val_win_f1:.4f} ({val_n_wins} wins)")
-    print(f"Test                              | File-F1={test_f1:.4f}  | Win-F1={test_win_f1:.4f} ({test_n_wins} wins)")
+    print(f"\nVal BAcc={best_bacc:.4f} thresh={best_thresh:.4f} | File-F1={best_f1:.4f} | Win-F1={val_win_f1:.4f} ({len(val_win_labels)} wins)")
     
-    fname_slug = f"htm_model_{config_idx:04d}_vf1{best_f1:.4f}_tf1{test_f1:.4f}"
+    fname_slug = f"htm_model_{config_idx:04d}_vf1{best_f1:.4f}"
     model_path = os.path.join(MODELS_DIR, f"{fname_slug}.pkl")
     with open(model_path, 'wb') as fh:
         pickle.dump({
@@ -338,7 +325,6 @@ def main():
             "ref_dwells": wcache['ref_dwells'], "ref_flights": wcache['ref_flights'], "ref_dists": wcache['ref_dists'],
             "config": cfg, "config_idx": config_idx, "val_bacc": float(best_bacc),
             "val_f1": float(best_f1), "val_win_f1": float(val_win_f1),
-            "test_f1": float(test_f1), "test_win_f1": float(test_win_f1),
         }, fh)
     print(f"  Model -> {model_path}")
     
@@ -348,8 +334,6 @@ def main():
         "val_bacc": float(best_bacc),
         "val_f1": float(best_f1),
         "val_win_f1": float(val_win_f1),
-        "test_f1": float(test_f1),
-        "test_win_f1": float(test_win_f1),
         "best_thresh": float(best_thresh),
         "live_thresh": float(best_thresh),
         "model_file": model_path,
@@ -359,11 +343,9 @@ def main():
         json.dump(result, fh, indent=2)
     print(f"  Result-> {results_path}")
 
-    title = (f"HTM Config {config_idx:04d} | Val BAcc={best_bacc:.4f} "
-             f"File-F1={best_f1:.4f} Win-F1={val_win_f1:.4f} | "
-             f"Test File-F1={test_f1:.4f} Win-F1={test_win_f1:.4f}")
+    title = f"HTM Config {config_idx:04d} | Val BAcc={best_bacc:.4f} File-F1={best_f1:.4f} Win-F1={val_win_f1:.4f}"
     plot_results(val_h_sq, val_b_sq, val_h_sc, val_b_sc, all_val_seqs, all_val_labels, best_thresh, best_bacc, fname_slug, title, warmup)
-    plot_confusion(all_val_labels, val_preds, all_test_labels, test_preds, fname_slug, title)
+    plot_confusion(all_val_labels, val_preds, val_win_labels, val_win_preds, fname_slug, title)
 
 if __name__ == "__main__":
     main()

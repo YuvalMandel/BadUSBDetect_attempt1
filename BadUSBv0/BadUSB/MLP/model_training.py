@@ -240,7 +240,8 @@ def plot_confusion_matrices(model, loaders):
 # 5. FILE-LEVEL EVALUATION
 # ==============================================================================
 def evaluate_file_level(model, scaler, split_json_path):
-    """Window-level + file-level (first-crossing) F1 on raw unbalanced test files."""
+    """Window-level + file-level (first-crossing) F1 on raw unbalanced files, all splits.
+    Plots a 2×3 confusion matrix figure (rows: window/file, cols: train/val/test)."""
     import json, joblib
     _mlp_dir = os.path.dirname(os.path.abspath(__file__))
     if _mlp_dir not in sys.path:
@@ -269,48 +270,75 @@ def evaluate_file_level(model, scaler, split_json_path):
         return
 
     model.eval()
-    file_labels, file_preds = [], []
-    win_labels,  win_preds  = [], []
+    split_names = ["train", "val", "test"]
+    results = {}
 
+    print("\n=== MLP File-level + Window-level evaluation (all splits) ===")
     with torch.no_grad():
-        for is_bot, file_list in [(0, split['test']['humans']),
-                                  (1, split['test']['bots'])]:
-            for fp in file_list:
-                d, f_det = parse_file(fp)
-                min_len = min(len(d), len(f_det))
-                if min_len < WINDOW_SIZE:
-                    continue
-                file_win_scores = []
-                for i in range(0, min_len - WINDOW_SIZE, STEP_SIZE_HUMAN):
-                    feats = extract_features(d[i:i+WINDOW_SIZE],
-                                             f_det[i:i+WINDOW_SIZE],
-                                             ref_d, ref_f, poly_model)
-                    if feats is None:
+        for split_name in split_names:
+            file_labels, file_preds = [], []
+            win_labels,  win_preds  = [], []
+
+            for is_bot, file_list in [(0, split[split_name]['humans']),
+                                      (1, split[split_name]['bots'])]:
+                for fp in file_list:
+                    d, f_det = parse_file(fp)
+                    min_len = min(len(d), len(f_det))
+                    if min_len < WINDOW_SIZE:
                         continue
-                    x = scaler.transform([feats])
-                    prob = model(torch.tensor(x, dtype=torch.float32).to(device)).item()
-                    file_win_scores.append(prob)
-                    win_labels.append(is_bot)
-                    win_preds.append(1 if prob >= 0.5 else 0)
-                if not file_win_scores:
-                    continue
-                file_pred = 1 if any(s >= 0.5 for s in file_win_scores) else 0
-                file_labels.append(is_bot)
-                file_preds.append(file_pred)
+                    file_win_scores = []
+                    for i in range(0, min_len - WINDOW_SIZE, STEP_SIZE_HUMAN):
+                        feats = extract_features(d[i:i+WINDOW_SIZE],
+                                                 f_det[i:i+WINDOW_SIZE],
+                                                 ref_d, ref_f, poly_model)
+                        if feats is None:
+                            continue
+                        x = scaler.transform([feats])
+                        prob = model(torch.tensor(x, dtype=torch.float32).to(device)).item()
+                        file_win_scores.append(prob)
+                        win_labels.append(is_bot)
+                        win_preds.append(1 if prob >= 0.5 else 0)
+                    if not file_win_scores:
+                        continue
+                    file_pred = 1 if any(s >= 0.5 for s in file_win_scores) else 0
+                    file_labels.append(is_bot)
+                    file_preds.append(file_pred)
 
-    if not file_labels:
-        print("  [file-level] No test files processed.")
-        return
+            results[split_name] = {
+                'win_labels': win_labels, 'win_preds': win_preds,
+                'file_labels': file_labels, 'file_preds': file_preds,
+            }
+            if file_labels:
+                win_f1  = f1_score(win_labels,  win_preds,  zero_division=0)
+                file_f1 = f1_score(file_labels, file_preds, zero_division=0)
+                print(f"  {split_name.upper():5s}: Win-F1={win_f1:.4f} ({len(win_labels)} windows) | "
+                      f"File-F1={file_f1:.4f} ({len(file_labels)} files)")
 
-    n_human = sum(1 for l in file_labels if l == 0)
-    n_bot   = sum(1 for l in file_labels if l == 1)
-    win_f1  = f1_score(win_labels,  win_preds,  zero_division=0)
-    file_f1 = f1_score(file_labels, file_preds, zero_division=0)
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig.suptitle("MLP — All Splits Confusion Matrices (Window-level / File-level)", fontsize=14)
 
-    print(f"\n=== MLP WINDOW-LEVEL F1 (test, unbalanced, all files) ===")
-    print(f"  F1: {win_f1:.4f}   ({len(win_labels)} windows)")
-    print(f"=== MLP FILE-LEVEL F1 (test, first_crossing) ===")
-    print(f"  F1: {file_f1:.4f}   ({n_human} human + {n_bot} bot files)")
+    for col, split_name in enumerate(split_names):
+        res = results[split_name]
+        for row, (labels, preds, row_title) in enumerate([
+            (res['win_labels'],  res['win_preds'],  "Window-level"),
+            (res['file_labels'], res['file_preds'], "File-level (first_crossing)"),
+        ]):
+            ax = axes[row, col]
+            if labels:
+                sns.heatmap(confusion_matrix(labels, preds), annot=True, fmt='d',
+                            cmap='Blues', ax=ax, cbar=False)
+            ax.set_title(f"{split_name.capitalize()} — {row_title}\n"
+                         f"F1={f1_score(labels, preds, zero_division=0):.4f}")
+            ax.set_xlabel('Predicted')
+            ax.set_ylabel('Actual')
+            ax.set_xticklabels(['Human', 'Bot'])
+            ax.set_yticklabels(['Human', 'Bot'])
+
+    plt.tight_layout()
+    save_path = os.path.join(RESULTS_DIR, 'mlp_all_splits_confusion.png')
+    plt.savefig(save_path, dpi=120, bbox_inches='tight')
+    print(f"Confusion matrices -> {save_path}")
+    plt.close()
 
 
 # ==============================================================================
