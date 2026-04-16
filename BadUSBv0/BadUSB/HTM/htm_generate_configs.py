@@ -106,10 +106,11 @@ def write_slurm_script(n_configs: int, out_path: str):
 #SBATCH --mem=8G
 #SBATCH --time=08:00:00
 
-export PATH="$HOME/miniconda3/bin:$HOME/anaconda3/bin:$PATH"
-source "$HOME/miniconda3/etc/profile.d/conda.sh" 2>/dev/null || source "$HOME/anaconda3/etc/profile.d/conda.sh"
-conda activate htm_keyboard_1
-export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+ENV_NAME=htm_keyboard_1
+export PATH="$HOME/miniconda3/envs/$ENV_NAME/bin:$HOME/anaconda3/envs/$ENV_NAME/bin:$HOME/miniconda3/bin:$HOME/anaconda3/bin:$PATH"
+source "$HOME/miniconda3/etc/profile.d/conda.sh" 2>/dev/null || source "$HOME/anaconda3/etc/profile.d/conda.sh" 2>/dev/null || true
+conda activate $ENV_NAME 2>/dev/null || true
+export LD_LIBRARY_PATH="$HOME/miniconda3/envs/$ENV_NAME/lib:${{CONDA_PREFIX:+$CONDA_PREFIX/lib:}}$LD_LIBRARY_PATH"
 
 cd "$SLURM_SUBMIT_DIR"
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 # SLURM job: BadUSBv0 MLP pipeline
-#   sbatch slurm/v0_train_mlp.sh
+#   cd BadUSBv0/BadUSB && sbatch slurm/v0_train_mlp.sh
 # ============================================================
 #SBATCH --job-name=v0_mlp
 #SBATCH --output=logs/v0_mlp_%j.out
@@ -12,7 +12,7 @@
 ##SBATCH --partition=<partition>
 ##SBATCH --account=<account>
 
-set -e   # stop immediately on any error
+set -e
 
 ENV_NAME=htm_keyboard_1
 export PATH="$HOME/miniconda3/envs/$ENV_NAME/bin:$HOME/anaconda3/envs/$ENV_NAME/bin:$HOME/miniconda3/bin:$HOME/anaconda3/bin:$PATH"
@@ -20,21 +20,20 @@ source "$HOME/miniconda3/etc/profile.d/conda.sh" 2>/dev/null || source "$HOME/an
 conda activate $ENV_NAME 2>/dev/null || true
 export LD_LIBRARY_PATH="$HOME/miniconda3/envs/$ENV_NAME/lib:${CONDA_PREFIX:+$CONDA_PREFIX/lib:}$LD_LIBRARY_PATH"
 
-# ── Absolute paths ────────────────────────────────────────────────────────────
-ROOT="$SLURM_SUBMIT_DIR"          # project root (where sbatch was run)
-WORK="$ROOT/BadUSBv0/BadUSB"
+# WORK = BadUSBv0/BadUSB/ (the directory sbatch was run from)
+WORK="$SLURM_SUBMIT_DIR"
 DATA="$WORK/dataset_generator"
 
 echo "========================================"
 echo "Job   : $SLURM_JOB_ID"
 echo "Node  : $(hostname)"
 echo "CPUs  : $SLURM_CPUS_PER_TASK"
-echo "ROOT  : $ROOT"
+echo "WORK  : $WORK"
 echo "Start : $(date)"
 echo "========================================"
 
 # ── Step 0: symlink UB dataset s2/ into dataset_generator/ (Newton only) ─────
-UB_S2="$ROOT/../UB_keystroke_dataset/s2"
+UB_S2="$WORK/../../UB_keystroke_dataset/s2"
 if [ ! -e "$DATA/s2" ] && [ -d "$UB_S2" ]; then
     ln -s "$UB_S2" "$DATA/s2"
     echo "Created symlink: $DATA/s2 -> $UB_S2"
@@ -48,7 +47,7 @@ if [ ! -d "$DATA/Synthetic_Bots" ]; then
     python -X utf8 bot_generator.py     -o Synthetic_Bots_test -f  5 -e 80
     python -X utf8 human_generator.py   -o Balanced_Humans      -f 124 -l 80 -e 1
     python -X utf8 human_generator.py   -o Balanced_Humans_test -f  24 -l 80 -e 0
-    cd "$ROOT"
+    cd "$WORK"
 fi
 
 # ── Step 2: person-disjoint split (skip if already done) ─────────────────────
@@ -57,10 +56,9 @@ if [ ! -f "$WORK/data_split.json" ]; then
     cd "$WORK"
     python -X utf8 split_persons.py \
         --bots-dir dataset_generator/Synthetic_Bots \
-        --ub-dir   "$ROOT/../UB_keystroke_dataset" \
+        --ub-dir   "$WORK/../../UB_keystroke_dataset" \
         --sessions s0 s1 s2 \
         --tasks    1
-    cd "$ROOT"
 fi
 
 # ── Step 3: train polynomial regressor (skip if pkl already present) ─────────
@@ -86,7 +84,7 @@ python -X utf8 dataset_csv_generator.py --split-json "$WORK/data_split.json"
 
 # ── Step 5: train MLP ─────────────────────────────────────────────────────────
 echo "--- Training MLP ---"
-python -X utf8 model_training.py
+python -X utf8 model_training.py --split-json "$WORK/data_split.json"
 
 echo "========================================"
 echo "End : $(date)"
