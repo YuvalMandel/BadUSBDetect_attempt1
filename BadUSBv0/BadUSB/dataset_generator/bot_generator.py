@@ -100,40 +100,6 @@ def generate_burst_mode(num_events):
     # Trim to required length
     return np.array(dwells[:num_events]), np.array(flights[:num_events])
 
-def generate_slow_typer(num_events):
-    """Hunt-and-peck style: very slow with high variance."""
-    mean_d = random.randint(200, 500)
-    std_d  = random.randint(80, 200)
-    mean_f = random.randint(300, 900)
-    std_f  = random.randint(100, 400)
-    dwells  = np.clip(np.random.normal(mean_d, std_d, num_events), 30, None)
-    flights = np.clip(np.random.normal(mean_f, std_f, num_events), 30, None)
-    return dwells, flights
-
-def generate_bimodal(num_events):
-    """Two-speed mix: 60% fast keystrokes (familiar keys), 40% slow (unfamiliar)."""
-    fast_d = random.randint(40, 80);   slow_d = random.randint(150, 350)
-    fast_f = random.randint(50, 100);  slow_f = random.randint(200, 600)
-    mask    = np.random.random(num_events) < 0.6
-    dwells  = np.where(mask,
-                       np.random.normal(fast_d, 8,  num_events),
-                       np.random.normal(slow_d, 40, num_events))
-    flights = np.where(mask,
-                       np.random.normal(fast_f, 12, num_events),
-                       np.random.normal(slow_f, 60, num_events))
-    return np.clip(dwells, 1, None), np.clip(flights, 1, None)
-
-def generate_periodic_rhythm(num_events):
-    """Mechanical rhythm: sinusoidal modulation on flight times."""
-    base_d    = random.randint(8, 20)
-    base_f    = random.randint(10, 30)
-    period    = random.randint(4, 12)
-    amplitude = random.uniform(0.3, 0.7) * base_f
-    t = np.arange(num_events)
-    dwells  = np.clip(base_d + np.random.normal(0, 1, num_events), 1, None)
-    flights = np.clip(base_f + amplitude * np.sin(2 * np.pi * t / period)
-                      + np.random.normal(0, 2, num_events), 1, None)
-    return dwells, flights
 
 # ==============================================================================
 # MAIN
@@ -155,14 +121,11 @@ def main():
     create_dir(args.output_dir)
     
     attack_types = {
-        "Machine_Gun":      generate_machine_gun,
-        "The_Robot":        generate_the_robot,
-        "Gaussian_Faker":   generate_gaussian_faker,
-        "Uniform_Jitter":   generate_uniform_jitter,
-        "Burst_Mode":       generate_burst_mode,
-        "Slow_Typer":       generate_slow_typer,
-        "Bimodal":          generate_bimodal,
-        "Periodic_Rhythm":  generate_periodic_rhythm,
+        "Machine_Gun":  generate_machine_gun,
+        "The_Robot":    generate_the_robot,
+        "Gaussian_Faker": generate_gaussian_faker,
+        "Uniform_Jitter": generate_uniform_jitter,
+        "Burst_Mode":   generate_burst_mode,
     }
     
     total_files = 0
