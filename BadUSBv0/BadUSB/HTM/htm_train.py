@@ -233,7 +233,7 @@ def main():
         inputDimensions=(input_width,),
         columnDimensions=(n_columns,),
         globalInhibition=True,
-        localAreaDensity=0,   # mutex with numActiveColumnsPerInhArea; default is 0.05 which conflicts
+        localAreaDensity=0.0,  # mutex with numActiveColumnsPerInhArea; float 0.0 required (int 0 breaks C++ binding)
         seed=seed,
         **{v: cfg[k] for k, v in SP_KEYS.items() if k in cfg},
     )

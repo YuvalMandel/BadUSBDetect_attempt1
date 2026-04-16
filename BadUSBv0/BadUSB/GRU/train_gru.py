@@ -84,9 +84,9 @@ class WeightedBCELoss(nn.Module):
 # 3. TRAINING HELPERS
 # ==============================================================================
 def _metrics(y_true, y_pred):
-    tag = torch.round(y_pred)
+    tag = torch.round(y_pred.detach())
     acc = (tag == y_true).float().mean().item()
-    f1  = f1_score(y_true.cpu().numpy(), tag.cpu().numpy(), zero_division=0)
+    f1  = f1_score(y_true.cpu().detach().numpy(), tag.cpu().numpy(), zero_division=0)
     return acc, f1
 
 def train_epoch(model, loader, criterion, optimizer):
