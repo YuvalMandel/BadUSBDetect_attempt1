@@ -274,12 +274,13 @@ def main():
             seq = wcache['sequences'].get(fp)
             if not seq: continue
             tm.reset()
+            al_eval = pickle.loads(al_live_bytes)  # fresh calibrated AL per file
             raw = []
             for stats, key_idx, dwell, flight, dist in seq:
                 enc_sdr = SDR(input_width); enc_sdr.dense = encoder.encode(stats, key_idx, dwell, flight, dist)
                 sp.compute(enc_sdr, False, active_columns)
                 tm.compute(active_columns, learn=False)
-                raw.append(al.compute(float(tm.anomaly)))
+                raw.append(al_eval.compute(float(tm.anomaly)))
             valid = raw[warmup:]
             scores.append(float(np.mean(valid)) if valid else 0.0)
             labels.append(1 if is_bot else 0)
@@ -293,7 +294,7 @@ def main():
     all_val_labels = val_h_lb + val_b_lb
 
     best_bacc, best_thresh = 0.0, 0.0
-    for th in np.linspace(0, 1, 200):
+    for th in np.linspace(0, 1, 500):
         preds = apply_detection(all_val_seqs, 'first_crossing', th, warmup, labels=all_val_labels)
         bacc = balanced_accuracy_score(all_val_labels, preds)
         if bacc > best_bacc:

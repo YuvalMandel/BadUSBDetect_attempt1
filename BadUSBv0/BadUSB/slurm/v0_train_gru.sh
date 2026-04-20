@@ -12,9 +12,8 @@
 #SBATCH --error=logs/v0_gru_%j.err
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --time=02:00:00
-##SBATCH --gres=gpu:1              # Uncomment to request a GPU
-##SBATCH --partition=gpu           # Uncomment if GPU partition has a name
+#SBATCH --time=24:00:00
+#SBATCH --gres=gpu:1
 ##SBATCH --partition=<partition>
 ##SBATCH --account=<account>
 
@@ -25,6 +24,13 @@ export PATH="$HOME/miniconda3/envs/$ENV_NAME/bin:$HOME/anaconda3/envs/$ENV_NAME/
 source "$HOME/miniconda3/etc/profile.d/conda.sh" 2>/dev/null || source "$HOME/anaconda3/etc/profile.d/conda.sh" 2>/dev/null || true
 conda activate $ENV_NAME 2>/dev/null || true
 export LD_LIBRARY_PATH="$HOME/miniconda3/envs/$ENV_NAME/lib:${CONDA_PREFIX:+$CONDA_PREFIX/lib:}$LD_LIBRARY_PATH"
+
+# Ensure CUDA-enabled PyTorch (installs once into conda env; skipped on subsequent runs)
+python -c "import torch; assert torch.cuda.is_available(), 'no cuda'" 2>/dev/null || {
+    echo "Installing CUDA-enabled PyTorch (cu121)..."
+    pip install torch --index-url https://download.pytorch.org/whl/cu121 --force-reinstall -q
+    echo "PyTorch CUDA install done."
+}
 
 WORK="$SLURM_SUBMIT_DIR"
 

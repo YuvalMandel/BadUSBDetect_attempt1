@@ -95,13 +95,14 @@ def evaluate_best_on_test(best_record):
             seq = wcache['sequences'].get(fp)
             if not seq: continue
             tm.reset()
+            al_eval = pickle.loads(al_bytes)  # fresh calibrated AL per file
             raw = []
             for stats, key_idx, dwell, flight, dist in seq:
                 enc = SDR(input_width)
                 enc.dense = encoder.encode(stats, key_idx, dwell, flight, dist)
                 sp.compute(enc, False, active_columns)
                 tm.compute(active_columns, learn=False)
-                raw.append(al.compute(float(tm.anomaly)))
+                raw.append(al_eval.compute(float(tm.anomaly)))
             seqs.append(raw); labels.append(1 if is_bot else 0)
         return seqs, labels
 

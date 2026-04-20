@@ -12,7 +12,7 @@
 #SBATCH --error=logs/v0_mlp_%j.err
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 ##SBATCH --gres=gpu:1              # Uncomment to request a GPU
 ##SBATCH --partition=gpu           # Uncomment if GPU partition has a name
 ##SBATCH --partition=<partition>
