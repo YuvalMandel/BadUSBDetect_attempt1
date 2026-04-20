@@ -27,8 +27,9 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix, f1_score, classification_report
 
 # --- CONFIGURATION ---
-DATASET_FILE    = "rnn_dataset.pt"
-MODEL_SAVE_PATH = "gru_model.pth"
+# Set per mode after arg parsing (see main())
+DATASET_FILE    = None
+MODEL_SAVE_PATH = None
 RESULTS_DIR     = os.path.join("..", "results", "GRU")
 
 BATCH_SIZE    = 64
@@ -119,55 +120,85 @@ def evaluate(model, loader, criterion):
 # ==============================================================================
 # 4. OPTUNA HP SEARCH  (val F1 objective — test never touched)
 # ==============================================================================
-def hp_search(X_train, y_train, X_val, y_val, n_trials, pos_weight):
+def hp_search(X_train, y_train, X_val, y_val, file_ids_val, n_trials, pos_weight):
     try:
         import optuna
     except ImportError:
         print("  [hp_search] optuna not installed. Run: pip install optuna")
         print("  [hp_search] Falling back to default HPs.")
-        return HIDDEN_DIM, NUM_LAYERS, 0.0, LEARNING_RATE, BATCH_SIZE
+        return HIDDEN_DIM, NUM_LAYERS, 0.0, LEARNING_RATE, BATCH_SIZE, 0.5
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     criterion  = WeightedBCELoss(pos_weight)
     val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=512)
-    n_jobs = max(1, min(n_trials, (os.cpu_count() or 1) // 2))
+    use_gpu = torch.cuda.is_available()
+    if use_gpu:
+        # CUDA context + fork (used by Optuna n_jobs>1) don't mix; run serial on GPU
+        n_jobs = 1
+        print(f"  GPU detected ({torch.cuda.get_device_name(0)}): serial trials on CUDA")
+    else:
+        n_jobs = max(1, min(n_trials, (os.cpu_count() or 1) // 2))
+        print(f"  CPU mode: n_jobs={n_jobs} (CPUs={os.cpu_count()})")
 
     def objective(trial):
-        torch.set_num_threads(1)  # prevent over-subscription with parallel trials
-        hidden_dim = trial.suggest_categorical("hidden_dim", [32, 64, 128, 256])
-        num_layers = trial.suggest_int("num_layers", 1, 2)
-        dropout    = trial.suggest_float("dropout",    0.0,  0.4, step=0.05)
-        lr         = trial.suggest_float("lr",         1e-4, 1e-2, log=True)
-        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
+        if not use_gpu:
+            torch.set_num_threads(1)  # prevent over-subscription with parallel CPU trials
+        hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256])
+        num_layers = 2  # fixed: 2 layers was optimal in both partial and full mode
+        dropout    = trial.suggest_float("dropout",   0.1,  0.4,  step=0.05)
+        lr         = trial.suggest_float("lr",        5e-5, 2e-3, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [16, 32, 64])
+        threshold  = trial.suggest_float("threshold", 0.3,  0.85, step=0.05)
 
         m   = GRUBotDetector(INPUT_DIM, hidden_dim, num_layers, dropout).to(device)
         opt = optim.Adam(m.parameters(), lr=lr)
         ldr = DataLoader(TensorDataset(X_train, y_train),
                          batch_size=batch_size, shuffle=True)
 
-        for _ in range(30):
+        for _ in range(30):   # 30-epoch quick eval per trial
             train_epoch(m, ldr, criterion, opt)
 
+        # File-level first-crossing F1 (real deployment metric)
         m.eval()
-        all_p, all_y = [], []
+        all_probs = []
         with torch.no_grad():
-            for Xb, yb in val_loader:
-                p = torch.round(m(Xb.to(device))).cpu().numpy().flatten()
-                all_p.extend(p); all_y.extend(yb.numpy().flatten())
-        return f1_score(all_y, all_p, zero_division=0)
+            for Xb, _ in val_loader:
+                all_probs.extend(m(Xb.to(device)).cpu().numpy().flatten())
+        all_probs = np.array(all_probs)
+
+        file_probs  = {}
+        file_labels = {}
+        for prob, label, fid in zip(all_probs, y_val.numpy().flatten(),
+                                    file_ids_val.numpy()):
+            fid = int(fid)
+            if fid not in file_probs:
+                file_probs[fid]  = []
+                file_labels[fid] = int(label)
+            file_probs[fid].append(prob)
+
+        ftrue, fpred = [], []
+        for fid in file_probs:
+            ftrue.append(file_labels[fid])
+            fpred.append(1 if any(p >= threshold for p in file_probs[fid]) else 0)
+        return f1_score(ftrue, fpred, zero_division=0)
 
     study = optuna.create_study(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=42)
     )
-    print(f"  Parallel trials: n_jobs={n_jobs} (CPUs={os.cpu_count()})")
-    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=False)
+    def trial_callback(study, trial):
+        print(f"  Trial {trial.number+1:>3}/{n_trials} | file_f1={trial.value:.4f} | "
+              f"best={study.best_value:.4f} | {trial.params}", flush=True)
+
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs,
+                   show_progress_bar=False, callbacks=[trial_callback])
 
     bp = study.best_params
-    print(f"\nHP search done — best val F1: {study.best_value:.4f}")
-    print(f"  hidden={bp['hidden_dim']}, layers={bp['num_layers']}, "
-          f"dropout={bp['dropout']:.2f}, lr={bp['lr']:.5f}, batch={bp['batch_size']}")
-    return bp["hidden_dim"], bp["num_layers"], bp["dropout"], bp["lr"], bp["batch_size"]
+    print(f"\nHP search done — best val file-F1: {study.best_value:.4f}")
+    print(f"  hidden={bp['hidden_dim']}, layers=2, "
+          f"dropout={bp['dropout']:.2f}, lr={bp['lr']:.5f}, batch={bp['batch_size']}, "
+          f"threshold={bp['threshold']:.2f}")
+    return bp["hidden_dim"], 2, bp["dropout"], bp["lr"], bp["batch_size"], bp["threshold"]
 
 # ==============================================================================
 # 5. VISUALISATION
@@ -208,7 +239,7 @@ def plot_confusion_matrices(model, loaders):
 # ==============================================================================
 # 6. FILE-LEVEL EVALUATION (all splits, 2×3 confusion matrix)
 # ==============================================================================
-def evaluate_file_level(model, split_json_path):
+def evaluate_file_level(model, split_json_path, mode="partial", threshold=0.5):
     """Window-level + file-level (first-crossing) F1 on raw unbalanced files, all splits."""
     _gru_dir = os.path.dirname(os.path.abspath(__file__))
     if _gru_dir not in sys.path:
@@ -221,7 +252,7 @@ def evaluate_file_level(model, split_json_path):
         split = json.load(fh)
 
     try:
-        sp = np.load("rnn_scaler_params.npy", allow_pickle=True)
+        sp = np.load(f"rnn_scaler_params_{mode}.npy", allow_pickle=True)
         mean, scale = sp[0], sp[1]
     except Exception as e:
         print(f"  [file-level] Cannot load rnn_scaler_params.npy: {e}"); return
@@ -247,10 +278,10 @@ def evaluate_file_level(model, split_json_path):
                         prob = model(x).item()
                         scores.append(prob)
                         win_labels.append(is_bot)
-                        win_preds.append(1 if prob >= 0.5 else 0)
+                        win_preds.append(1 if prob >= threshold else 0)
                     if not scores: continue
                     file_labels.append(is_bot)
-                    file_preds.append(1 if any(s >= 0.5 for s in scores) else 0)
+                    file_preds.append(1 if any(s >= threshold for s in scores) else 0)
 
             results[split_name] = dict(wl=win_labels, wp=win_preds,
                                        fl=file_labels, fp=file_preds)
@@ -297,6 +328,10 @@ def main():
                         help="Number of HP configurations to try (default 50).")
     args = parser.parse_args()
 
+    global DATASET_FILE, MODEL_SAVE_PATH
+    DATASET_FILE    = f"rnn_dataset_{args.mode}.pt"
+    MODEL_SAVE_PATH = f"gru_model_{args.mode}.pth"
+
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     # 1. Load tensors
@@ -309,6 +344,7 @@ def main():
     X_train, y_train = data["X_train"], data["y_train"]
     X_val,   y_val   = data["X_val"],   data["y_val"]
     X_test,  y_test  = data["X_test"],  data["y_test"]
+    file_ids_val     = data.get("file_ids_val", torch.arange(len(y_val)))
 
     print(f"  Train: {X_train.shape}  Val: {X_val.shape}  Test: {X_test.shape}")
 
@@ -324,13 +360,15 @@ def main():
     criterion = WeightedBCELoss(pos_weight)
 
     # 3. HP search or defaults
+    best_threshold = 0.5
     if args.search:
-        print(f"\nRunning Optuna HP search ({args.n_configs} configs, objective: val F1)...")
-        hidden_dim, num_layers, dropout, lr, batch_size = hp_search(
-            X_train, y_train, X_val, y_val, args.n_configs, pos_weight
+        print(f"\nRunning Optuna HP search ({args.n_configs} configs, objective: val file-F1)...")
+        hidden_dim, num_layers, dropout, lr, batch_size, best_threshold = hp_search(
+            X_train, y_train, X_val, y_val, file_ids_val, args.n_configs, pos_weight
         )
         best_hps = {"hidden_dim": hidden_dim, "num_layers": num_layers,
-                    "dropout": dropout, "lr": lr, "batch_size": batch_size}
+                    "dropout": dropout, "lr": lr, "batch_size": batch_size,
+                    "threshold": best_threshold}
         hp_path = os.path.join(RESULTS_DIR, "gru_best_hps.json")
         with open(hp_path, "w") as fh:
             json.dump(best_hps, fh, indent=2)
@@ -372,7 +410,7 @@ def main():
     model.load_state_dict(torch.load(MODEL_SAVE_PATH, weights_only=True))
     plot_history(history)
     plot_confusion_matrices(model, [train_loader, val_loader, test_loader])
-    evaluate_file_level(model, args.split_json)
+    evaluate_file_level(model, args.split_json, args.mode, threshold=best_threshold)
 
 
 if __name__ == "__main__":

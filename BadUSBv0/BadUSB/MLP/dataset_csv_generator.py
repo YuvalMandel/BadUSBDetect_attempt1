@@ -123,7 +123,7 @@ def extract_features(w_d, w_f_detailed, reference_pool_d, reference_pool_f, poly
 # ==============================================================================
 # 3. WORKER FUNCTION
 # ==============================================================================
-def process_single_file(filepath, label, step_size, ref_dwells, ref_flights, poly_model):
+def process_single_file(filepath, label, step_size, ref_dwells, ref_flights, poly_model, file_id=0):
     d, f_det = parse_file(filepath)
     min_len = min(len(d), len(f_det))
     if min_len < WINDOW_SIZE: return []
@@ -134,7 +134,7 @@ def process_single_file(filepath, label, step_size, ref_dwells, ref_flights, pol
         w_f = f_det[i : i + WINDOW_SIZE]
         feats = extract_features(w_d, w_f, ref_dwells, ref_flights, poly_model)
         if feats:
-            rows.append(feats + [label])
+            rows.append(feats + [label, file_id])
     return rows
 
 # ==============================================================================
@@ -162,14 +162,16 @@ COLS = [
     "D_Mean", "D_Med", "D_Std", "D_Skew", "D_Kurt", "D_MinKS", "D_MinW",
     "F_Mean", "F_Med", "F_Std", "F_Skew", "F_Kurt", "F_MinKS", "F_MinW",
     "Poly_Err_Mean", "Poly_Err_Med", "Poly_Err_Std",
-    "Label"
+    "Label", "FileID"
 ]
 
 def process_split(split_name, human_files, bot_files, ref_d, ref_f, poly_model,
                   max_workers, mode="partial"):
     tasks = (
-        [(f, 0, STEP_SIZE_HUMAN, ref_d, ref_f, poly_model) for f in human_files] +
-        [(f, 1, STEP_SIZE_BOT,   ref_d, ref_f, poly_model) for f in bot_files]
+        [(f, 0, STEP_SIZE_HUMAN, ref_d, ref_f, poly_model, i)
+         for i, f in enumerate(human_files)] +
+        [(f, 1, STEP_SIZE_BOT,   ref_d, ref_f, poly_model, len(human_files) + i)
+         for i, f in enumerate(bot_files)]
     )
 
     rows = []

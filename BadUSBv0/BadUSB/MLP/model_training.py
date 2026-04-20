@@ -63,12 +63,16 @@ def prepare_data():
         if not os.path.exists(path):
             raise FileNotFoundError(f"{path} not found. Run dataset_csv_generator.py first.")
         df = pd.read_csv(path)
-        return df.drop("Label", axis=1).values, df["Label"].values
+        drop_cols = [c for c in ["Label", "FileID"] if c in df.columns]
+        X = df.drop(drop_cols, axis=1).values
+        y = df["Label"].values
+        file_ids = df["FileID"].values if "FileID" in df.columns else np.arange(len(y))
+        return X, y, file_ids
 
     print("Loading person-disjoint splits...")
-    X_train, y_train = load_csv(TRAIN_CSV)
-    X_val,   y_val   = load_csv(VAL_CSV)
-    X_test,  y_test  = load_csv(TEST_CSV)
+    X_train, y_train, _        = load_csv(TRAIN_CSV)
+    X_val,   y_val,   fids_val = load_csv(VAL_CSV)
+    X_test,  y_test,  _        = load_csv(TEST_CSV)
 
     print(f"  Train: {len(X_train)}  (pos={int(y_train.sum())}, neg={int((y_train==0).sum())})")
     print(f"  Val:   {len(X_val)}")
@@ -80,7 +84,7 @@ def prepare_data():
     X_test  = scaler.transform(X_test)
 
     np.save(SCALER_SAVE_PATH, [scaler.mean_, scaler.scale_])
-    return (X_train, y_train), (X_val, y_val), (X_test, y_test), scaler
+    return (X_train, y_train), (X_val, y_val), (X_test, y_test), scaler, fids_val
 
 # ==============================================================================
 # 2. MODEL — flexible hidden layers + optional dropout
@@ -163,29 +167,28 @@ def evaluate(model, loader, criterion):
 # ==============================================================================
 # 5. OPTUNA HP SEARCH  (val F1 objective — test never touched)
 # ==============================================================================
-def hp_search(X_train, y_train, X_val, y_val, n_trials, pos_weight):
+def hp_search(X_train, y_train, X_val, y_val, file_ids_val, n_trials, pos_weight):
     try:
         import optuna
     except ImportError:
         print("  [hp_search] optuna not installed. Run: pip install optuna")
         print("  [hp_search] Falling back to default HPs.")
-        return (64, 32, 16), 0.0, LEARNING_RATE, BATCH_SIZE
+        return (64, 32, 16), 0.0, LEARNING_RATE, BATCH_SIZE, 0.5
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     criterion = WeightedBCELoss(pos_weight)
-    val_loader = DataLoader(BadUSBDataset(X_val, y_val), batch_size=512)
 
     n_jobs = max(1, min(n_trials, (os.cpu_count() or 1) // 2))
 
     def objective(trial):
         torch.set_num_threads(1)  # prevent over-subscription with parallel trials
-        n_hidden    = trial.suggest_int("n_hidden", 1, 3)
-        # Always suggest 3 layer widths; use only the first n_hidden
-        all_widths  = [trial.suggest_categorical(f"h{i}", [32, 64, 128, 256]) for i in range(3)]
-        hidden_dims = tuple(all_widths[:n_hidden])
-        dropout     = trial.suggest_float("dropout",    0.0,  0.4,  step=0.05)
-        lr          = trial.suggest_float("lr",         1e-4, 1e-2, log=True)
-        batch_size  = trial.suggest_categorical("batch_size", [16, 32, 64, 128])
+        # Single hidden layer (both partial & full bests were 1-layer; prevents overfitting)
+        hidden_dim  = trial.suggest_categorical("h0", [32, 64, 128, 256])
+        hidden_dims = (hidden_dim,)
+        dropout     = trial.suggest_float("dropout",   0.1,  0.4,  step=0.05)
+        lr          = trial.suggest_float("lr",        3e-4, 8e-3, log=True)
+        batch_size  = trial.suggest_categorical("batch_size", [16, 32, 64])
+        threshold   = trial.suggest_float("threshold", 0.3,  0.85, step=0.05)
 
         m   = BadUSBClassifier(INPUT_SIZE, hidden_dims, dropout).to(device)
         opt = optim.Adam(m.parameters(), lr=lr)
@@ -195,29 +198,46 @@ def hp_search(X_train, y_train, X_val, y_val, n_trials, pos_weight):
         for _ in range(30):   # 30-epoch quick eval per trial
             train_epoch(m, ldr, criterion, opt)
 
+        # File-level first-crossing F1 (real deployment metric)
         m.eval()
-        all_p, all_y = [], []
         with torch.no_grad():
-            for Xb, yb in val_loader:
-                p = torch.round(m(Xb.to(device))).cpu().numpy().flatten()
-                all_p.extend(p); all_y.extend(yb.numpy().flatten())
-        return f1_score(all_y, all_p, zero_division=0)
+            X_val_t = torch.tensor(X_val, dtype=torch.float32).to(device)
+            probs = m(X_val_t).cpu().numpy().flatten()
+
+        file_probs  = {}
+        file_labels = {}
+        for prob, label, fid in zip(probs, y_val, file_ids_val):
+            fid = int(fid)
+            if fid not in file_probs:
+                file_probs[fid]  = []
+                file_labels[fid] = int(label)
+            file_probs[fid].append(prob)
+
+        ftrue, fpred = [], []
+        for fid in file_probs:
+            ftrue.append(file_labels[fid])
+            fpred.append(1 if any(p >= threshold for p in file_probs[fid]) else 0)
+        return f1_score(ftrue, fpred, zero_division=0)
 
     study = optuna.create_study(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=42)
     )
     print(f"  Parallel trials: n_jobs={n_jobs} (CPUs={os.cpu_count()})")
-    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=False)
+
+    def trial_callback(study, trial):
+        print(f"  Trial {trial.number+1:>3}/{n_trials} | file_f1={trial.value:.4f} | "
+              f"best={study.best_value:.4f} | {trial.params}", flush=True)
+
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs,
+                   show_progress_bar=False, callbacks=[trial_callback])
 
     bp = study.best_params
-    print(f"\nHP search done — best val F1: {study.best_value:.4f}")
-    n_h = bp["n_hidden"]
-    print(f"  n_hidden={n_h}, dims={[bp[f'h{i}'] for i in range(n_h)]}, "
-          f"dropout={bp['dropout']:.2f}, lr={bp['lr']:.5f}, batch={bp['batch_size']}")
+    print(f"\nHP search done — best val file-F1: {study.best_value:.4f}")
+    print(f"  hidden=[{bp['h0']}], dropout={bp['dropout']:.2f}, "
+          f"lr={bp['lr']:.5f}, batch={bp['batch_size']}, threshold={bp['threshold']:.2f}")
 
-    hidden_dims = tuple(bp[f"h{i}"] for i in range(n_h))
-    return hidden_dims, bp["dropout"], bp["lr"], bp["batch_size"]
+    return (bp["h0"],), bp["dropout"], bp["lr"], bp["batch_size"], bp["threshold"]
 
 # ==============================================================================
 # 6. VISUALISATION
@@ -258,7 +278,7 @@ def plot_confusion_matrices(model, loaders):
 # ==============================================================================
 # 7. FILE-LEVEL EVALUATION (all splits, 2×3 confusion matrix)
 # ==============================================================================
-def evaluate_file_level(model, scaler, split_json_path):
+def evaluate_file_level(model, scaler, split_json_path, threshold=0.5):
     """Window-level + file-level (first-crossing) F1 on raw unbalanced files, all splits."""
     import joblib
     _mlp_dir = os.path.dirname(os.path.abspath(__file__))
@@ -306,10 +326,10 @@ def evaluate_file_level(model, scaler, split_json_path):
                                                   dtype=torch.float32).to(device)).item()
                         scores.append(prob)
                         win_labels.append(is_bot)
-                        win_preds.append(1 if prob >= 0.5 else 0)
+                        win_preds.append(1 if prob >= threshold else 0)
                     if not scores: continue
                     file_labels.append(is_bot)
-                    file_preds.append(1 if any(s >= 0.5 for s in scores) else 0)
+                    file_preds.append(1 if any(s >= threshold for s in scores) else 0)
 
             results[split_name] = dict(wl=win_labels, wp=win_preds,
                                        fl=file_labels, fp=file_preds)
@@ -359,7 +379,7 @@ def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
     # 1. Data
-    (X_train, y_train), (X_val, y_val), (X_test, y_test), scaler = prepare_data()
+    (X_train, y_train), (X_val, y_val), (X_test, y_test), scaler, fids_val = prepare_data()
 
     # 2. Class weight for imbalanced (full) mode
     pos_weight = None
@@ -373,13 +393,14 @@ def main():
     criterion = WeightedBCELoss(pos_weight)
 
     # 3. HP search or defaults
+    best_threshold = 0.5
     if args.search:
-        print(f"\nRunning Optuna HP search ({args.n_configs} configs, objective: val F1)...")
-        hidden_dims, dropout, lr, batch_size = hp_search(
-            X_train, y_train, X_val, y_val, args.n_configs, pos_weight
+        print(f"\nRunning Optuna HP search ({args.n_configs} configs, objective: val file-F1)...")
+        hidden_dims, dropout, lr, batch_size, best_threshold = hp_search(
+            X_train, y_train, X_val, y_val, fids_val, args.n_configs, pos_weight
         )
         best_hps = {"hidden_dims": list(hidden_dims), "dropout": dropout,
-                    "lr": lr, "batch_size": batch_size}
+                    "lr": lr, "batch_size": batch_size, "threshold": best_threshold}
         hp_path = os.path.join(RESULTS_DIR, "mlp_best_hps.json")
         with open(hp_path, "w") as fh:
             json.dump(best_hps, fh, indent=2)
@@ -422,7 +443,7 @@ def main():
     model.load_state_dict(torch.load(MODEL_SAVE_PATH, weights_only=True))
     plot_history(history)
     plot_confusion_matrices(model, [train_loader, val_loader, test_loader])
-    evaluate_file_level(model, scaler, args.split_json)
+    evaluate_file_level(model, scaler, args.split_json, threshold=best_threshold)
 
 
 if __name__ == "__main__":

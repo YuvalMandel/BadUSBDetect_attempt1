@@ -11,8 +11,9 @@ SEQ_LEN        = 15   # Sequence length
 STEP_SIZE      = 1    # Sliding window step
 MAX_KEYSTROKES = 150  # truncate every file to first N keystrokes (same across MLP/GRU/HTM)
 
-OUTPUT_FILE = "rnn_dataset.pt"
-SCALER_FILE = "rnn_scaler_params.npy"
+# Set per mode after arg parsing (see main())
+OUTPUT_FILE = None
+SCALER_FILE = None
 
 # ==============================================================================
 # 1. PARSER (Returns raw milliseconds)
@@ -58,15 +59,17 @@ def parse_file(filepath):
 # 2. SEQUENCE EXTRACTION
 # ==============================================================================
 def files_to_sequences(file_list):
-    seqs = []
-    for filepath in tqdm(file_list, desc="  Parsing"):
+    seqs     = []
+    file_ids = []
+    for file_idx, filepath in enumerate(tqdm(file_list, desc="  Parsing")):
         d, f = parse_file(filepath)
         if len(d) < SEQ_LEN:
             continue
         for i in range(0, len(d) - SEQ_LEN, STEP_SIZE):
             seq = np.column_stack((d[i:i+SEQ_LEN], f[i:i+SEQ_LEN]))
             seqs.append(seq)
-    return seqs
+            file_ids.append(file_idx)
+    return seqs, file_ids
 
 # ==============================================================================
 # 3. MAIN PIPELINE
@@ -80,6 +83,10 @@ def main():
                              "'full': all windows, imbalanced — training script uses class weights.")
     args = parser.parse_args()
 
+    global OUTPUT_FILE, SCALER_FILE
+    OUTPUT_FILE = f"rnn_dataset_{args.mode}.pt"
+    SCALER_FILE = f"rnn_scaler_params_{args.mode}.npy"
+
     split_json = os.path.abspath(args.split_json)
     if not os.path.exists(split_json):
         print(f"ERROR: {split_json} not found. Run split_persons.py first.")
@@ -90,13 +97,17 @@ def main():
     # ── Extract sequences per split ───────────────────────────────────────────
     tensors = {}
     X_train_seqs, X_val_seqs, X_test_seqs = None, None, None
+    fids_val = None
 
     for name in ("train", "val", "test"):
         print(f"\n[{name}]  humans={len(split[name]['humans'])}, "
               f"bots={len(split[name]['bots'])}")
 
-        human_seqs = files_to_sequences(split[name]["humans"])
-        bot_seqs   = files_to_sequences(split[name]["bots"])
+        human_seqs, human_fids_raw = files_to_sequences(split[name]["humans"])
+        bot_seqs,   bot_fids_raw   = files_to_sequences(split[name]["bots"])
+        # offset bot IDs so they don't collide with human IDs within the split
+        bot_offset   = len(split[name]["humans"])
+        bot_fids_raw = [fid + bot_offset for fid in bot_fids_raw]
 
         print(f"  Windows: humans={len(human_seqs)}, bots={len(bot_seqs)}")
 
@@ -107,23 +118,26 @@ def main():
                 continue
             import random
             random.seed(42)
-            h_use = random.sample(human_seqs, n)
-            b_use = random.sample(bot_seqs,   n)
+            h_pairs = random.sample(list(zip(human_seqs, human_fids_raw)), n)
+            b_pairs = random.sample(list(zip(bot_seqs,   bot_fids_raw)),   n)
+            h_use  = [p[0] for p in h_pairs];  h_fids = [p[1] for p in h_pairs]
+            b_use  = [p[0] for p in b_pairs];  b_fids = [p[1] for p in b_pairs]
             print(f"  Partial mode: balanced to {n} per class")
         else:  # full
             if len(human_seqs) == 0 or len(bot_seqs) == 0:
                 print(f"  WARNING: empty split '{name}', skipping.")
                 continue
-            h_use = human_seqs
-            b_use = bot_seqs
+            h_use  = human_seqs;  h_fids = human_fids_raw
+            b_use  = bot_seqs;    b_fids = bot_fids_raw
             print(f"  Full mode: {len(h_use)} human + {len(b_use)} bot windows (imbalanced)")
 
-        X = np.array(h_use + b_use)
-        y = np.concatenate([np.zeros(len(h_use)), np.ones(len(b_use))])
+        X    = np.array(h_use + b_use)
+        y    = np.concatenate([np.zeros(len(h_use)), np.ones(len(b_use))])
+        fids = np.array(h_fids + b_fids)
 
         # Shuffle
         idx = np.random.default_rng(42).permutation(len(X))
-        X, y = X[idx], y[idx]
+        X, y, fids = X[idx], y[idx], fids[idx]
 
         if name == "train":
             X_train_seqs = X
@@ -131,6 +145,7 @@ def main():
         elif name == "val":
             X_val_seqs = X
             y_val = y
+            fids_val = fids
         else:
             X_test_seqs = X
             y_test = y
@@ -159,6 +174,8 @@ def main():
     if X_val_s is not None:
         dataset["X_val"] = torch.tensor(X_val_s, dtype=torch.float32)
         dataset["y_val"] = torch.tensor(y_val,   dtype=torch.float32).unsqueeze(1)
+        if fids_val is not None:
+            dataset["file_ids_val"] = torch.tensor(fids_val, dtype=torch.int64)
     if X_test_s is not None:
         dataset["X_test"] = torch.tensor(X_test_s, dtype=torch.float32)
         dataset["y_test"] = torch.tensor(y_test,   dtype=torch.float32).unsqueeze(1)
