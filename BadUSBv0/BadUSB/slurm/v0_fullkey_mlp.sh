@@ -29,25 +29,29 @@ WORK="$SLURM_SUBMIT_DIR"
 echo "========================================"
 echo "Job   : $SLURM_JOB_ID"
 echo "Node  : $(hostname)"
-echo "Mode  : full | tag: fullkey | HP search: 32 configs"
+echo "Mode  : full | tag: fullkey | HPs from mlp_best_hps.json"
 echo "WORK  : $WORK"
 echo "Start : $(date)"
 echo "========================================"
 
-echo "--- Feature extraction (mode=full, no keystroke limit) ---"
 cd "$WORK/MLP"
-python -X utf8 dataset_csv_generator.py \
-    --split-json "$WORK/data_split.json" \
-    --mode full \
-    --tag fullkey
 
-echo "--- Training MLP (mode=full, tag=fullkey, search 32 configs) ---"
+if [ ! -f "train_dataset_fullkey.csv" ]; then
+    echo "--- Feature extraction (mode=full, no keystroke limit) ---"
+    python -X utf8 dataset_csv_generator.py \
+        --split-json "$WORK/data_split.json" \
+        --mode full \
+        --tag fullkey
+else
+    echo "--- train_dataset_fullkey.csv already exists, skipping ---"
+fi
+
+echo "--- Training MLP with best known HPs (tag=fullkey) ---"
 python -X utf8 model_training.py \
     --split-json "$WORK/data_split.json" \
     --mode full \
     --tag fullkey \
-    --search \
-    --n-configs 32
+    --hps-json "$WORK/results/MLP/mlp_best_hps.json"
 
 echo "========================================"
 echo "End : $(date)"

@@ -29,25 +29,29 @@ WORK="$SLURM_SUBMIT_DIR"
 echo "========================================"
 echo "Job   : $SLURM_JOB_ID"
 echo "Node  : $(hostname)"
-echo "Mode  : full | tag: fullkey | HP search: 32 configs"
+echo "Mode  : full | tag: fullkey | HPs from gru_best_hps.json"
 echo "WORK  : $WORK"
 echo "Start : $(date)"
 echo "========================================"
 
-echo "--- Building RNN tensors (mode=full, no keystroke limit) ---"
 cd "$WORK/GRU"
-python -X utf8 translate_to_tensors.py \
-    --split-json "$WORK/data_split.json" \
-    --mode full \
-    --tag fullkey
 
-echo "--- Training GRU (mode=full, tag=fullkey, search 32 configs) ---"
+if [ ! -f "rnn_dataset_full_fullkey.pt" ]; then
+    echo "--- Building RNN tensors (mode=full, no keystroke limit) ---"
+    python -X utf8 translate_to_tensors.py \
+        --split-json "$WORK/data_split.json" \
+        --mode full \
+        --tag fullkey
+else
+    echo "--- rnn_dataset_full_fullkey.pt already exists, skipping ---"
+fi
+
+echo "--- Training GRU with best known HPs (tag=fullkey) ---"
 python -X utf8 train_gru.py \
     --split-json "$WORK/data_split.json" \
     --mode full \
     --tag fullkey \
-    --search \
-    --n-configs 32
+    --hps-json "$WORK/results/GRU/gru_best_hps.json"
 
 echo "========================================"
 echo "End : $(date)"

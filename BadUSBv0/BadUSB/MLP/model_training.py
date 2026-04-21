@@ -374,6 +374,8 @@ def main():
                              "Requires: pip install optuna")
     parser.add_argument("--n-configs", type=int, default=50,
                         help="Number of HP configurations to try (default 50).")
+    parser.add_argument("--hps-json", default=None,
+                        help="Load best HPs from a JSON file instead of searching or using defaults.")
     parser.add_argument("--tag", default="", help="Extra suffix for CSV inputs and model output (e.g. 'fullkey')")
     args = parser.parse_args()
 
@@ -403,7 +405,17 @@ def main():
 
     # 3. HP search or defaults
     best_threshold = 0.5
-    if args.search:
+    if args.hps_json:
+        with open(args.hps_json) as fh:
+            hps = json.load(fh)
+        hidden_dims    = tuple(hps["hidden_dims"])
+        dropout        = hps["dropout"]
+        lr             = hps["lr"]
+        batch_size     = hps["batch_size"]
+        best_threshold = hps.get("threshold", 0.5)
+        print(f"Loaded HPs from {args.hps_json}: hidden={hidden_dims}, dropout={dropout:.2f}, "
+              f"lr={lr:.5f}, batch={batch_size}, thresh={best_threshold}")
+    elif args.search:
         print(f"\nRunning Optuna HP search ({args.n_configs} configs, objective: val file-F1)...")
         hidden_dims, dropout, lr, batch_size, best_threshold = hp_search(
             X_train, y_train, X_val, y_val, fids_val, args.n_configs, pos_weight
