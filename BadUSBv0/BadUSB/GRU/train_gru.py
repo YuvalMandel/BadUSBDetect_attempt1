@@ -239,7 +239,7 @@ def plot_confusion_matrices(model, loaders):
 # ==============================================================================
 # 6. FILE-LEVEL EVALUATION (all splits, 2×3 confusion matrix)
 # ==============================================================================
-def evaluate_file_level(model, split_json_path, mode="partial", threshold=0.5):
+def evaluate_file_level(model, split_json_path, mode="partial", threshold=0.5, tag=""):
     """Window-level + file-level (first-crossing) F1 on raw unbalanced files, all splits."""
     _gru_dir = os.path.dirname(os.path.abspath(__file__))
     if _gru_dir not in sys.path:
@@ -251,11 +251,12 @@ def evaluate_file_level(model, split_json_path, mode="partial", threshold=0.5):
     with open(split_json_path) as fh:
         split = json.load(fh)
 
+    tag_suffix = f"_{tag}" if tag else ""
     try:
-        sp = np.load(f"rnn_scaler_params_{mode}.npy", allow_pickle=True)
+        sp = np.load(f"rnn_scaler_params_{mode}{tag_suffix}.npy", allow_pickle=True)
         mean, scale = sp[0], sp[1]
     except Exception as e:
-        print(f"  [file-level] Cannot load rnn_scaler_params.npy: {e}"); return
+        print(f"  [file-level] Cannot load rnn_scaler_params_{mode}{tag_suffix}.npy: {e}"); return
 
     model.eval()
     results = {}
@@ -313,7 +314,73 @@ def evaluate_file_level(model, split_json_path, mode="partial", threshold=0.5):
     print(f"Confusion matrices -> {p}")
 
 # ==============================================================================
-# 7. MAIN
+# 7. THRESHOLD TUNING (no retraining)
+# ==============================================================================
+def tune_threshold_mode(args):
+    tag_suffix   = f"_{args.tag}" if args.tag else ""
+    dataset_file = f"rnn_dataset_{args.mode}{tag_suffix}.pt"
+    model_path   = f"gru_model_{args.mode}{tag_suffix}.pth"
+
+    print(f"Loading tensors from {dataset_file}...")
+    data = torch.load(dataset_file, weights_only=False)
+    X_val, y_val     = data["X_val"], data["y_val"]
+    file_ids_val     = data.get("file_ids_val", torch.arange(len(y_val)))
+
+    if args.hps_json:
+        with open(args.hps_json) as fh:
+            hps = json.load(fh)
+        hidden_dim, num_layers, dropout = hps["hidden_dim"], hps["num_layers"], hps["dropout"]
+    else:
+        hidden_dim, num_layers, dropout = HIDDEN_DIM, NUM_LAYERS, 0.0
+
+    model = GRUBotDetector(INPUT_DIM, hidden_dim, num_layers, dropout).to(device)
+    model.load_state_dict(torch.load(model_path, weights_only=True))
+    model.eval()
+    print(f"Loaded model from {model_path}")
+
+    val_loader = DataLoader(TensorDataset(X_val, y_val), batch_size=1024)
+    probs = []
+    with torch.no_grad():
+        for Xb, _ in val_loader:
+            probs.extend(model(Xb.to(device)).cpu().numpy().flatten())
+    probs  = np.array(probs)
+    y_np   = y_val.numpy().flatten()
+    fids   = file_ids_val.numpy()
+
+    file_probs, file_labels = {}, {}
+    for p, lbl, fid in zip(probs, y_np, fids):
+        fid = int(fid)
+        file_probs.setdefault(fid, []).append(float(p))
+        file_labels.setdefault(fid, int(lbl))
+
+    print(f"\nThreshold sweep on val ({len(file_probs)} files, "
+          f"{sum(v for v in file_labels.values())} bot files):")
+    best_t, best_f1 = 0.5, -1.0
+    for t in np.round(np.arange(0.01, 1.0, 0.01), 2):
+        ftrue = [file_labels[fid] for fid in file_probs]
+        fpred = [1 if any(p >= t for p in file_probs[fid]) else 0 for fid in file_probs]
+        f1 = f1_score(ftrue, fpred, zero_division=0)
+        if f1 > best_f1:
+            best_f1, best_t = f1, float(t)
+            print(f"  thresh={t:.2f}  val_file_F1={f1:.4f}  ***")
+
+    print(f"\nBest threshold: {best_t:.2f}  val_file_F1={best_f1:.4f}")
+
+    if args.hps_json and os.path.exists(args.hps_json):
+        with open(args.hps_json) as fh:
+            hps = json.load(fh)
+        hps["threshold"] = best_t
+        with open(args.hps_json, "w") as fh:
+            json.dump(hps, fh, indent=2)
+        print(f"Updated threshold in {args.hps_json}")
+
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    evaluate_file_level(model, args.split_json, args.mode,
+                        threshold=best_t, tag=args.tag)
+
+
+# ==============================================================================
+# 8. MAIN
 # ==============================================================================
 def main():
     parser = argparse.ArgumentParser()
@@ -329,12 +396,18 @@ def main():
                         help="Number of HP configurations to try (default 50).")
     parser.add_argument("--hps-json", default=None,
                         help="Load best HPs from a JSON file instead of searching or using defaults.")
+    parser.add_argument("--tune-threshold", action="store_true",
+                        help="Skip training; sweep val thresholds on saved model and report test results.")
     args = parser.parse_args()
 
     global DATASET_FILE, MODEL_SAVE_PATH
     tag_suffix = f"_{args.tag}" if args.tag else ""
     DATASET_FILE    = f"rnn_dataset_{args.mode}{tag_suffix}.pt"
     MODEL_SAVE_PATH = f"gru_model_{args.mode}{tag_suffix}.pth"
+
+    if args.tune_threshold:
+        tune_threshold_mode(args)
+        return
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -425,7 +498,7 @@ def main():
     model.load_state_dict(torch.load(MODEL_SAVE_PATH, weights_only=True))
     plot_history(history)
     plot_confusion_matrices(model, [train_loader, val_loader, test_loader])
-    evaluate_file_level(model, args.split_json, args.mode, threshold=best_threshold)
+    evaluate_file_level(model, args.split_json, args.mode, threshold=best_threshold, tag=args.tag)
 
 
 if __name__ == "__main__":

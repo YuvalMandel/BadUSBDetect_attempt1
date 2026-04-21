@@ -361,7 +361,82 @@ def evaluate_file_level(model, scaler, split_json_path, threshold=0.5):
     print(f"Confusion matrices -> {p}")
 
 # ==============================================================================
-# 8. MAIN
+# 8. THRESHOLD TUNING (no retraining)
+# ==============================================================================
+def tune_threshold_mode(args):
+    from sklearn.preprocessing import StandardScaler as _SS
+    tag_suffix  = f"_{args.tag}" if args.tag else ""
+    val_csv     = f"val_dataset{tag_suffix}.csv"
+    model_path  = f"badusb_model{tag_suffix}.pth"
+    scaler_path = f"scaler_params{tag_suffix}.npy"
+
+    if not os.path.exists(val_csv):
+        print(f"ERROR: {val_csv} not found."); return
+
+    df    = pd.read_csv(val_csv)
+    drop  = [c for c in ["Label", "FileID"] if c in df.columns]
+    X_val = df.drop(drop, axis=1).values
+    y_val = df["Label"].values
+    fids  = df["FileID"].values if "FileID" in df.columns else np.arange(len(y_val))
+
+    sp = np.load(scaler_path, allow_pickle=True)
+    scaler = _SS()
+    scaler.mean_, scaler.scale_ = sp[0], sp[1]
+    scaler.var_ = scaler.scale_ ** 2
+    scaler.n_features_in_ = len(scaler.mean_)
+    scaler.n_samples_seen_ = 1
+    X_val = scaler.transform(X_val)
+
+    if args.hps_json:
+        with open(args.hps_json) as fh:
+            hps = json.load(fh)
+        hidden_dims = tuple(hps["hidden_dims"])
+        dropout     = hps["dropout"]
+    else:
+        hidden_dims, dropout = (64, 32, 16), 0.0
+
+    model = BadUSBClassifier(INPUT_SIZE, hidden_dims, dropout).to(device)
+    model.load_state_dict(torch.load(model_path, weights_only=True))
+    model.eval()
+    print(f"Loaded model from {model_path}")
+
+    X_t = torch.tensor(X_val, dtype=torch.float32)
+    with torch.no_grad():
+        probs = model(X_t.to(device)).cpu().numpy().flatten()
+
+    file_probs, file_labels = {}, {}
+    for p, lbl, fid in zip(probs, y_val, fids):
+        fid = int(fid)
+        file_probs.setdefault(fid, []).append(float(p))
+        file_labels.setdefault(fid, int(lbl))
+
+    print(f"\nThreshold sweep on val ({len(file_probs)} files, "
+          f"{sum(v for v in file_labels.values())} bot files):")
+    best_t, best_f1 = 0.5, -1.0
+    for t in np.round(np.arange(0.01, 1.0, 0.01), 2):
+        ftrue = [file_labels[fid] for fid in file_probs]
+        fpred = [1 if any(p >= t for p in file_probs[fid]) else 0 for fid in file_probs]
+        f1 = f1_score(ftrue, fpred, zero_division=0)
+        if f1 > best_f1:
+            best_f1, best_t = f1, float(t)
+            print(f"  thresh={t:.2f}  val_file_F1={f1:.4f}  ***")
+
+    print(f"\nBest threshold: {best_t:.2f}  val_file_F1={best_f1:.4f}")
+
+    if args.hps_json and os.path.exists(args.hps_json):
+        with open(args.hps_json) as fh:
+            hps = json.load(fh)
+        hps["threshold"] = best_t
+        with open(args.hps_json, "w") as fh:
+            json.dump(hps, fh, indent=2)
+        print(f"Updated threshold in {args.hps_json}")
+
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    evaluate_file_level(model, scaler, args.split_json, threshold=best_t)
+
+
+# ==============================================================================
+# 9. MAIN
 # ==============================================================================
 def main():
     parser = argparse.ArgumentParser()
@@ -377,6 +452,8 @@ def main():
     parser.add_argument("--hps-json", default=None,
                         help="Load best HPs from a JSON file instead of searching or using defaults.")
     parser.add_argument("--tag", default="", help="Extra suffix for CSV inputs and model output (e.g. 'fullkey')")
+    parser.add_argument("--tune-threshold", action="store_true",
+                        help="Skip training; sweep val thresholds on saved model and report test results.")
     args = parser.parse_args()
 
     global TRAIN_CSV, VAL_CSV, TEST_CSV, MODEL_SAVE_PATH, SCALER_SAVE_PATH
@@ -386,6 +463,10 @@ def main():
     TEST_CSV         = f"test_dataset{tag_suffix}.csv"
     MODEL_SAVE_PATH  = f"badusb_model{tag_suffix}.pth"
     SCALER_SAVE_PATH = f"scaler_params{tag_suffix}.npy"
+
+    if args.tune_threshold:
+        tune_threshold_mode(args)
+        return
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
