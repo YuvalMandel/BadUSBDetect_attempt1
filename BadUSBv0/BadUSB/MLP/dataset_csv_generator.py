@@ -185,8 +185,8 @@ def process_split(split_name, human_files, bot_files, ref_d, ref_f, poly_model,
             except Exception:
                 pass
 
-    humans_r = [r for r in rows if r[-1] == 0]
-    bots_r   = [r for r in rows if r[-1] == 1]
+    humans_r = [r for r in rows if r[-2] == 0]  # r[-2]=label, r[-1]=file_id
+    bots_r   = [r for r in rows if r[-2] == 1]
 
     if mode == "partial":
         n = min(len(humans_r), len(bots_r))

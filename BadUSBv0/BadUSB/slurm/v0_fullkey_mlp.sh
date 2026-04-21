@@ -36,15 +36,11 @@ echo "========================================"
 
 cd "$WORK/MLP"
 
-if [ ! -f "train_dataset_fullkey.csv" ]; then
-    echo "--- Feature extraction (mode=full, no keystroke limit) ---"
-    python -X utf8 dataset_csv_generator.py \
-        --split-json "$WORK/data_split.json" \
-        --mode full \
-        --tag fullkey
-else
-    echo "--- train_dataset_fullkey.csv already exists, skipping ---"
-fi
+echo "--- Feature extraction (mode=full, no keystroke limit) ---"
+python -X utf8 dataset_csv_generator.py \
+    --split-json "$WORK/data_split.json" \
+    --mode full \
+    --tag fullkey
 
 echo "--- Training MLP with best known HPs (tag=fullkey) ---"
 python -X utf8 model_training.py \
