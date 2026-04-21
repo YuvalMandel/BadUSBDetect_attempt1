@@ -334,7 +334,7 @@ def tune_threshold_mode(args):
         hidden_dim, num_layers, dropout = HIDDEN_DIM, NUM_LAYERS, 0.0
 
     model = GRUBotDetector(INPUT_DIM, hidden_dim, num_layers, dropout).to(device)
-    model.load_state_dict(torch.load(model_path, weights_only=True))
+    model.load_state_dict(torch.load(model_path, weights_only=True, map_location=device))
     model.eval()
     print(f"Loaded model from {model_path}")
 

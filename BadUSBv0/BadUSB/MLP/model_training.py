@@ -396,7 +396,7 @@ def tune_threshold_mode(args):
         hidden_dims, dropout = (64, 32, 16), 0.0
 
     model = BadUSBClassifier(INPUT_SIZE, hidden_dims, dropout).to(device)
-    model.load_state_dict(torch.load(model_path, weights_only=True))
+    model.load_state_dict(torch.load(model_path, weights_only=True, map_location=device))
     model.eval()
     print(f"Loaded model from {model_path}")
 
