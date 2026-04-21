@@ -9,7 +9,7 @@ from tqdm import tqdm
 # --- SETTINGS ---
 SEQ_LEN        = 15   # Sequence length
 STEP_SIZE      = 1    # Sliding window step
-MAX_KEYSTROKES = 150  # truncate every file to first N keystrokes (same across MLP/GRU/HTM)
+MAX_KEYSTROKES = None  # truncate every file to first N keystrokes; None = no limit
 
 # Set per mode after arg parsing (see main())
 OUTPUT_FILE = None
@@ -52,7 +52,7 @@ def parse_file(filepath):
                 delta   = (ts - down_ts) / scale
                 if 0 < delta < 3000: dwells.append(delta)
 
-    min_len = min(len(dwells), len(flights), MAX_KEYSTROKES)
+    min_len = min(len(dwells), len(flights)) if MAX_KEYSTROKES is None else min(len(dwells), len(flights), MAX_KEYSTROKES)
     return np.array(dwells[:min_len]), np.array(flights[:min_len])
 
 # ==============================================================================
@@ -81,11 +81,13 @@ def main():
     parser.add_argument("--mode", choices=["partial", "full"], default="partial",
                         help="'partial' (default): balance by undersampling. "
                              "'full': all windows, imbalanced — training script uses class weights.")
+    parser.add_argument("--tag", default="", help="Extra suffix for output filenames (e.g. 'fullkey')")
     args = parser.parse_args()
 
     global OUTPUT_FILE, SCALER_FILE
-    OUTPUT_FILE = f"rnn_dataset_{args.mode}.pt"
-    SCALER_FILE = f"rnn_scaler_params_{args.mode}.npy"
+    tag_suffix = f"_{args.tag}" if args.tag else ""
+    OUTPUT_FILE = f"rnn_dataset_{args.mode}{tag_suffix}.pt"
+    SCALER_FILE = f"rnn_scaler_params_{args.mode}{tag_suffix}.npy"
 
     split_json = os.path.abspath(args.split_json)
     if not os.path.exists(split_json):

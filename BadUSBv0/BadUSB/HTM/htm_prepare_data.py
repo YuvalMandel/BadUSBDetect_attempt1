@@ -37,7 +37,7 @@ SPLIT_JSON = os.path.join(_badusb_root, "data_split.json")
 OUTPUT_CACHE = os.path.join(_here, "windows_cache.pkl")
 WINDOW_SIZE    = 10
 WINDOW_STEP    = 1
-MAX_KEYSTROKES = 150  # truncate every file to first N keystrokes (same across MLP/GRU/HTM)
+MAX_KEYSTROKES = None  # truncate every file to first N keystrokes; None = no limit
 
 # --- Multiprocessing worker ---
 _w_cache = None
@@ -64,6 +64,15 @@ def _process_file(fp):
     return fp, seq if seq else None, False
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--tag", default="", help="Extra suffix for output cache filename (e.g. 'fullkey')")
+    args = parser.parse_args()
+
+    tag_suffix = f"_{args.tag}" if args.tag else ""
+    global OUTPUT_CACHE
+    OUTPUT_CACHE = os.path.join(_here, f"windows_cache{tag_suffix}.pkl")
+
     if not os.path.exists(SPLIT_JSON):
         print(f"ERROR: {SPLIT_JSON} not found. Run split_persons.py first.")
         sys.exit(1)

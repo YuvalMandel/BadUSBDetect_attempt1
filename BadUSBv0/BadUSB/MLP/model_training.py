@@ -374,7 +374,16 @@ def main():
                              "Requires: pip install optuna")
     parser.add_argument("--n-configs", type=int, default=50,
                         help="Number of HP configurations to try (default 50).")
+    parser.add_argument("--tag", default="", help="Extra suffix for CSV inputs and model output (e.g. 'fullkey')")
     args = parser.parse_args()
+
+    global TRAIN_CSV, VAL_CSV, TEST_CSV, MODEL_SAVE_PATH, SCALER_SAVE_PATH
+    tag_suffix = f"_{args.tag}" if args.tag else ""
+    TRAIN_CSV        = f"train_dataset{tag_suffix}.csv"
+    VAL_CSV          = f"val_dataset{tag_suffix}.csv"
+    TEST_CSV         = f"test_dataset{tag_suffix}.csv"
+    MODEL_SAVE_PATH  = f"badusb_model{tag_suffix}.pth"
+    SCALER_SAVE_PATH = f"scaler_params{tag_suffix}.npy"
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
 

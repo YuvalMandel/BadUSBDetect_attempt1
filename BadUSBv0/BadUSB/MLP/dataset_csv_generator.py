@@ -16,7 +16,7 @@ WINDOW_SIZE = 15
 STEP_SIZE_HUMAN = 1
 STEP_SIZE_BOT = 1
 NUM_REFERENCES = 20       # diminishing returns beyond ~15-20 references
-MAX_KEYSTROKES = 150      # truncate every file to first N keystrokes (same across MLP/GRU/HTM)
+MAX_KEYSTROKES = None     # truncate every file to first N keystrokes; None = no limit
 
 OUTPUT_REFS = "reference_pool.npz"
 POLY_MODEL_PATH = "poly_regressor.pkl"
@@ -166,7 +166,7 @@ COLS = [
 ]
 
 def process_split(split_name, human_files, bot_files, ref_d, ref_f, poly_model,
-                  max_workers, mode="partial"):
+                  max_workers, mode="partial", tag=""):
     tasks = (
         [(f, 0, STEP_SIZE_HUMAN, ref_d, ref_f, poly_model, i)
          for i, f in enumerate(human_files)] +
@@ -197,7 +197,8 @@ def process_split(split_name, human_files, bot_files, ref_d, ref_f, poly_model,
         balance_note = f"→ {len(balanced)} rows (imbalanced, use class weights)"
 
     df = pd.DataFrame(balanced, columns=COLS).sample(frac=1).reset_index(drop=True)
-    out_csv = f"{split_name}_dataset.csv"
+    tag_suffix = f"_{tag}" if tag else ""
+    out_csv = f"{split_name}_dataset{tag_suffix}.csv"
     df.to_csv(out_csv, index=False)
     print(f"  Saved {out_csv}  ({len(humans_r)} human / {len(bots_r)} bot windows {balance_note})")
     return df
@@ -212,6 +213,7 @@ def main():
     parser.add_argument("--mode", choices=["partial", "full"], default="partial",
                         help="'partial' (default): balance by undersampling majority class. "
                              "'full': all windows, imbalanced — training scripts use class weights.")
+    parser.add_argument("--tag", default="", help="Extra suffix for output CSV filenames (e.g. 'fullkey')")
     args = parser.parse_args()
 
     # Load split manifest
@@ -246,7 +248,7 @@ def main():
         process_split(name,
                       split[name]["humans"],
                       split[name]["bots"],
-                      ref_d, ref_f, poly_model, max_workers, mode=args.mode)
+                      ref_d, ref_f, poly_model, max_workers, mode=args.mode, tag=args.tag)
 
     print("\nDone. Files created: train_dataset.csv, val_dataset.csv, test_dataset.csv")
 

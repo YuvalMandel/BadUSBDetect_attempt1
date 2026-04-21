@@ -131,6 +131,8 @@ def plot_confusion(val_file_labels, val_file_preds, val_win_labels, val_win_pred
 def main():
     parser = argparse.ArgumentParser(description="Train one HTM-Combined config")
     parser.add_argument("--config", help="Path to JSON config (optional)")
+    parser.add_argument("--cache", default=None, help="Path to windows cache pkl (overrides default)")
+    parser.add_argument("--tag", default="", help="Extra suffix for output model/result filenames (e.g. 'fullkey')")
     args = parser.parse_args()
 
     for d in (MODELS_DIR, PLOTS_DIR, RESULTS_DIR):
@@ -182,7 +184,11 @@ def main():
     if not os.path.exists(WINDOWS_CACHE):
         print(f"ERROR: {WINDOWS_CACHE} not found. Run htm_prepare_data.py first.")
         sys.exit(1)
-    with open(WINDOWS_CACHE, 'rb') as f:
+    cache_path = args.cache if args.cache else WINDOWS_CACHE
+    if not os.path.exists(cache_path):
+        print(f"ERROR: {cache_path} not found. Run htm_prepare_data.py first.")
+        sys.exit(1)
+    with open(cache_path, 'rb') as f:
         wcache = pickle.load(f)
 
     window_size = wcache['window_size']
@@ -315,7 +321,8 @@ def main():
 
     print(f"\nVal BAcc={best_bacc:.4f} thresh={best_thresh:.4f} | File-F1={best_f1:.4f} | Win-F1={val_win_f1:.4f} ({len(val_win_labels)} wins)")
     
-    fname_slug = f"htm_model_{config_idx:04d}_vf1{best_f1:.4f}"
+    tag_suffix = f"_{args.tag}" if args.tag else ""
+    fname_slug = f"htm_model_{config_idx:04d}_vf1{best_f1:.4f}{tag_suffix}"
     model_path = os.path.join(MODELS_DIR, f"{fname_slug}.pkl")
     with open(model_path, 'wb') as fh:
         pickle.dump({

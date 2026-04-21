@@ -321,6 +321,7 @@ def main():
     parser.add_argument("--mode", choices=["partial", "full"], default="partial",
                         help="'partial': balanced tensors (default). "
                              "'full': imbalanced, uses pos_weight in loss.")
+    parser.add_argument("--tag", default="", help="Extra suffix for output filenames (e.g. 'fullkey')")
     parser.add_argument("--search", action="store_true",
                         help="Run Optuna HP search (val F1 objective). "
                              "Requires: pip install optuna")
@@ -329,8 +330,9 @@ def main():
     args = parser.parse_args()
 
     global DATASET_FILE, MODEL_SAVE_PATH
-    DATASET_FILE    = f"rnn_dataset_{args.mode}.pt"
-    MODEL_SAVE_PATH = f"gru_model_{args.mode}.pth"
+    tag_suffix = f"_{args.tag}" if args.tag else ""
+    DATASET_FILE    = f"rnn_dataset_{args.mode}{tag_suffix}.pt"
+    MODEL_SAVE_PATH = f"gru_model_{args.mode}{tag_suffix}.pth"
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
