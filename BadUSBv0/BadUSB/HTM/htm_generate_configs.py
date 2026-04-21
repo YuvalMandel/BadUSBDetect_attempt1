@@ -89,7 +89,8 @@ def find_start_idx(results_dir: str) -> int:
             pass
     return max_idx + 1
 
-def write_slurm_script(n_configs: int, out_path: str):
+def write_slurm_script(n_configs: int, start_idx: int, out_path: str):
+    array_range = f"{start_idx}-{start_idx + n_configs - 1}%20"
     script = f"""\
 #!/bin/bash
 # SLURM job array for HTM hyperparameter search
@@ -101,7 +102,7 @@ def write_slurm_script(n_configs: int, out_path: str):
 #SBATCH --job-name=v0_htm_train
 #SBATCH --output=logs/v0_htm_train_%A_%a.out
 #SBATCH --error=logs/v0_htm_train_%A_%a.err
-#SBATCH --array=0-{n_configs - 1}%10
+#SBATCH --array={array_range}
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=8G
 #SBATCH --time=08:00:00
@@ -176,7 +177,7 @@ def main():
     print(f"Generated {n} new configs in {configs_dir}")
     
     slurm_script_path = os.path.join(slurm_dir, "v0_train_htm_array.sh")
-    write_slurm_script(n, slurm_script_path)
+    write_slurm_script(n, start_idx, slurm_script_path)
 
 if __name__ == "__main__":
     main()
