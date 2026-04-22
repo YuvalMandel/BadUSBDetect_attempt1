@@ -374,9 +374,35 @@ def tune_threshold_mode(args):
             json.dump(hps, fh, indent=2)
         print(f"Updated threshold in {args.hps_json}")
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    evaluate_file_level(model, args.split_json, args.mode,
-                        threshold=best_t, tag=args.tag)
+    # Fast evaluation from stored tensors (val has file_ids; test uses sequential fid)
+    X_test = data.get("X_test")
+    y_test = data.get("y_test")
+    for split_name, X_s, y_s, fids_s in [
+        ("val",  X_val,  y_val,  file_ids_val),
+        ("test", X_test, y_test, None),
+    ]:
+        if X_s is None: continue
+        loader_s = DataLoader(TensorDataset(X_s, y_s), batch_size=1024)
+        p_s = []
+        with torch.no_grad():
+            for Xb, _ in loader_s:
+                p_s.extend(model(Xb.to(device)).cpu().numpy().flatten())
+        p_s   = np.array(p_s)
+        y_np  = y_s.numpy().flatten()
+        if fids_s is None:
+            fids_s = torch.arange(len(y_np))
+        fp, fl = {}, {}
+        for p, lbl, fid in zip(p_s, y_np, fids_s.numpy()):
+            fid = int(fid)
+            fp.setdefault(fid, []).append(float(p))
+            fl.setdefault(fid, int(lbl))
+        ftrue   = [fl[fid] for fid in fp]
+        fpred   = [1 if any(p >= best_t for p in fp[fid]) else 0 for fid in fp]
+        win_f1  = f1_score(y_np, (p_s >= best_t).astype(int), zero_division=0)
+        file_f1 = f1_score(ftrue, fpred, zero_division=0)
+        n_bot   = sum(fl.values())
+        print(f"  {split_name.upper():5s}: Win-F1={win_f1:.4f} ({len(y_np)} windows) | "
+              f"File-F1={file_f1:.4f} ({len(fp)} files, {n_bot} bot)")
 
 
 # ==============================================================================

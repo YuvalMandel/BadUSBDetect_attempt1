@@ -431,8 +431,30 @@ def tune_threshold_mode(args):
             json.dump(hps, fh, indent=2)
         print(f"Updated threshold in {args.hps_json}")
 
-    os.makedirs(RESULTS_DIR, exist_ok=True)
-    evaluate_file_level(model, scaler, args.split_json, threshold=best_t)
+    # Fast test evaluation from CSV (avoids slow KS/Wasserstein re-extraction)
+    for split_name, csv_path in [("val", val_csv),
+                                  ("test", f"test_dataset{tag_suffix}.csv")]:
+        if not os.path.exists(csv_path):
+            continue
+        df_s = pd.read_csv(csv_path)
+        X_s  = df_s.drop([c for c in ["Label", "FileID"] if c in df_s.columns], axis=1).values
+        y_s  = df_s["Label"].values
+        f_s  = df_s["FileID"].values if "FileID" in df_s.columns else np.arange(len(y_s))
+        X_s  = scaler.transform(X_s)
+        with torch.no_grad():
+            p_s = model(torch.tensor(X_s, dtype=torch.float32).to(device)).cpu().numpy().flatten()
+        fp, fl = {}, {}
+        for p, lbl, fid in zip(p_s, y_s, f_s):
+            fid = int(fid)
+            fp.setdefault(fid, []).append(float(p))
+            fl.setdefault(fid, int(lbl))
+        ftrue = [fl[fid] for fid in fp]
+        fpred = [1 if any(p >= best_t for p in fp[fid]) else 0 for fid in fp]
+        win_f1  = f1_score(y_s, (p_s >= best_t).astype(int), zero_division=0)
+        file_f1 = f1_score(ftrue, fpred, zero_division=0)
+        n_bot   = sum(fl.values())
+        print(f"  {split_name.upper():5s}: Win-F1={win_f1:.4f} ({len(y_s)} windows) | "
+              f"File-F1={file_f1:.4f} ({len(fp)} files, {n_bot} bot)")
 
 
 # ==============================================================================
