@@ -178,10 +178,16 @@ def hp_search(X_train, y_train, X_val, y_val, file_ids_val, n_trials, pos_weight
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     criterion = WeightedBCELoss(pos_weight)
 
-    n_jobs = max(1, min(n_trials, (os.cpu_count() or 1) // 2))
+    use_gpu = torch.cuda.is_available()
+    if use_gpu:
+        n_jobs = 1
+        print(f"  GPU detected ({torch.cuda.get_device_name(0)}): serial trials on CUDA")
+    else:
+        n_jobs = max(1, min(n_trials, (os.cpu_count() or 1) // 2))
 
     def objective(trial):
-        torch.set_num_threads(1)  # prevent over-subscription with parallel trials
+        if not use_gpu:
+            torch.set_num_threads(1)  # prevent over-subscription with parallel CPU trials
         # Single hidden layer (both partial & full bests were 1-layer; prevents overfitting)
         hidden_dim  = trial.suggest_categorical("h0", [32, 64, 128, 256])
         hidden_dims = (hidden_dim,)
@@ -223,7 +229,8 @@ def hp_search(X_train, y_train, X_val, y_val, file_ids_val, n_trials, pos_weight
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=42)
     )
-    print(f"  Parallel trials: n_jobs={n_jobs} (CPUs={os.cpu_count()})")
+    if not use_gpu:
+        print(f"  Parallel trials: n_jobs={n_jobs} (CPUs={os.cpu_count()})")
 
     def trial_callback(study, trial):
         print(f"  Trial {trial.number+1:>3}/{n_trials} | file_f1={trial.value:.4f} | "
