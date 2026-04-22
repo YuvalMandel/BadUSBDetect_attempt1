@@ -151,6 +151,7 @@ def main():
         else:
             X_test_seqs = X
             y_test = y
+            fids_test = fids
 
     if X_train_seqs is None:
         print("ERROR: no training data."); return
@@ -181,6 +182,8 @@ def main():
     if X_test_s is not None:
         dataset["X_test"] = torch.tensor(X_test_s, dtype=torch.float32)
         dataset["y_test"] = torch.tensor(y_test,   dtype=torch.float32).unsqueeze(1)
+        if fids_test is not None:
+            dataset["file_ids_test"] = torch.tensor(fids_test, dtype=torch.int64)
 
     torch.save(dataset, OUTPUT_FILE)
 
