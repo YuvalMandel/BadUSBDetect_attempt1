@@ -52,7 +52,7 @@ def write_array_script(n: int, tag: str, out_path: str) -> None:
 #SBATCH --array=0-{n - 1}%10
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --time=2:00:00
+#SBATCH --time=1-00:00:00
 #SBATCH --gres=gpu:1
 
 set -e
