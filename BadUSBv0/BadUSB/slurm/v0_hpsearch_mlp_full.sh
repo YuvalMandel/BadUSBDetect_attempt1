@@ -9,7 +9,7 @@
 #SBATCH --error=logs/v0_mlp_hpsearch_%j.err
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=32G
-#SBATCH --time=1-00:00:00
+#SBATCH --time=3-00:00:00
 #SBATCH --gres=gpu:1
 
 set -e
