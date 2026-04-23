@@ -368,7 +368,115 @@ def evaluate_file_level(model, scaler, split_json_path, threshold=0.5):
     print(f"Confusion matrices -> {p}")
 
 # ==============================================================================
-# 8. THRESHOLD TUNING (no retraining)
+# 8. ARRAY HP SEARCH — per-trial and collect modes
+# ==============================================================================
+def _load_data_for_trial():
+    """Load + scale train/val CSVs without writing scaler (safe for parallel array tasks)."""
+    def _csv(path):
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{path} not found. Run dataset_csv_generator.py first.")
+        df = pd.read_csv(path)
+        drop = [c for c in ["Label", "FileID"] if c in df.columns]
+        X = df.drop(drop, axis=1).values
+        y = df["Label"].values
+        fids = df["FileID"].values if "FileID" in df.columns else np.arange(len(y))
+        return X, y, fids
+
+    X_tr, y_tr, _         = _csv(TRAIN_CSV)
+    X_va, y_va, fids_val  = _csv(VAL_CSV)
+    print(f"  Train: {len(X_tr)} (pos={int(y_tr.sum())}), Val: {len(X_va)}")
+    from sklearn.preprocessing import StandardScaler as _SS
+    sc = _SS().fit(X_tr)
+    return sc.transform(X_tr), y_tr, sc.transform(X_va), y_va, fids_val
+
+
+def run_trial_mode(args):
+    import time as _time
+    with open(args.trial_config) as fh:
+        cfg = json.load(fh)
+    trial_idx = cfg["trial_idx"]
+
+    hp_results_dir = os.path.join(RESULTS_DIR, "hp_results")
+    os.makedirs(hp_results_dir, exist_ok=True)
+    result_path = os.path.join(hp_results_dir, f"trial_{trial_idx:04d}.json")
+    if os.path.exists(result_path):
+        print(f"Trial {trial_idx} already done, skipping."); return
+
+    print(f"=== MLP HP Trial {trial_idx} ===  {cfg}", flush=True)
+    X_tr, y_tr, X_va, y_va, fids_val = _load_data_for_trial()
+
+    pos_weight = None
+    if args.mode == "full":
+        n_pos = int(y_tr.sum()); n_neg = int((y_tr == 0).sum())
+        pos_weight = torch.tensor([n_neg / n_pos], dtype=torch.float32)
+        print(f"  pos_weight={pos_weight.item():.2f}")
+
+    model = BadUSBClassifier(INPUT_SIZE, (cfg["h0"],), cfg["dropout"]).to(device)
+    opt   = optim.Adam(model.parameters(), lr=cfg["lr"])
+    crit  = WeightedBCELoss(pos_weight)
+    ldr   = DataLoader(BadUSBDataset(X_tr, y_tr), batch_size=cfg["batch_size"], shuffle=True)
+
+    t0 = _time.time()
+    for ep in range(30):
+        train_epoch(model, ldr, crit, opt)
+        if (ep + 1) % 10 == 0:
+            print(f"  epoch {ep+1}/30", flush=True)
+
+    model.eval()
+    with torch.no_grad():
+        probs = model(torch.tensor(X_va, dtype=torch.float32).to(device)).cpu().numpy().flatten()
+
+    fp, fl = {}, {}
+    for p, lbl, fid in zip(probs, y_va, fids_val):
+        fid = int(fid)
+        fp.setdefault(fid, []).append(float(p)); fl.setdefault(fid, int(lbl))
+    ftrue = [fl[fid] for fid in fp]
+    fpred = [1 if any(p >= cfg["threshold"] for p in fp[fid]) else 0 for fid in fp]
+    val_f1 = f1_score(ftrue, fpred, zero_division=0)
+
+    result = {"trial_idx": trial_idx, "config": cfg,
+              "val_file_f1": val_f1, "elapsed_s": round(_time.time() - t0, 1)}
+    with open(result_path, "w") as fh:
+        json.dump(result, fh, indent=2)
+    print(f"Trial {trial_idx}: val_file_F1={val_f1:.4f} ({result['elapsed_s']:.0f}s) -> {result_path}",
+          flush=True)
+
+
+def collect_mode(args):
+    import glob as _glob
+    tag_suffix = f"_{args.tag}" if args.tag else ""
+    hp_results_dir = os.path.join(RESULTS_DIR, "hp_results")
+    files = sorted(_glob.glob(os.path.join(hp_results_dir, "trial_*.json")))
+    if not files:
+        print(f"No trial results in {hp_results_dir}"); return
+
+    rows = []
+    for f in files:
+        with open(f) as fh:
+            rows.append(json.load(fh))
+    rows.sort(key=lambda r: r["val_file_f1"], reverse=True)
+
+    print(f"\n=== MLP HP search results ({len(rows)} completed trials) ===")
+    for r in rows[:15]:
+        c = r["config"]
+        print(f"  [{r['trial_idx']:04d}] val_f1={r['val_file_f1']:.4f}  "
+              f"h0={c['h0']} dr={c['dropout']:.2f} lr={c['lr']:.5f} "
+              f"bs={c['batch_size']} thr={c['threshold']:.2f}")
+
+    best_c = rows[0]["config"]
+    best_hps = {"hidden_dims": [best_c["h0"]], "dropout": best_c["dropout"],
+                "lr": best_c["lr"], "batch_size": best_c["batch_size"],
+                "threshold": best_c["threshold"]}
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    hp_path = os.path.join(RESULTS_DIR, f"mlp_best_hps{tag_suffix}.json")
+    with open(hp_path, "w") as fh:
+        json.dump(best_hps, fh, indent=2)
+    print(f"\nBest trial {rows[0]['trial_idx']}: val_file_F1={rows[0]['val_file_f1']:.4f}")
+    print(f"Best HPs -> {hp_path}")
+
+
+# ==============================================================================
+# 9. THRESHOLD TUNING (no retraining)
 # ==============================================================================
 def tune_threshold_mode(args):
     from sklearn.preprocessing import StandardScaler as _SS
@@ -483,6 +591,10 @@ def main():
     parser.add_argument("--tag", default="", help="Extra suffix for CSV inputs and model output (e.g. 'fullkey')")
     parser.add_argument("--tune-threshold", action="store_true",
                         help="Skip training; sweep val thresholds on saved model and report test results.")
+    parser.add_argument("--trial-config", default=None,
+                        help="Run one HP trial from a config JSON, save result to hp_results/.")
+    parser.add_argument("--collect", action="store_true",
+                        help="Collect trial results, save best HPs JSON (no training).")
     args = parser.parse_args()
 
     global TRAIN_CSV, VAL_CSV, TEST_CSV, MODEL_SAVE_PATH, SCALER_SAVE_PATH
@@ -495,6 +607,12 @@ def main():
 
     if args.tune_threshold:
         tune_threshold_mode(args)
+        return
+    if args.trial_config:
+        run_trial_mode(args)
+        return
+    if args.collect:
+        collect_mode(args)
         return
 
     os.makedirs(RESULTS_DIR, exist_ok=True)

@@ -314,7 +314,111 @@ def evaluate_file_level(model, split_json_path, mode="partial", threshold=0.5, t
     print(f"Confusion matrices -> {p}")
 
 # ==============================================================================
-# 7. THRESHOLD TUNING (no retraining)
+# 7. ARRAY HP SEARCH — per-trial and collect modes
+# ==============================================================================
+def run_trial_mode(args):
+    import time as _time
+    with open(args.trial_config) as fh:
+        cfg = json.load(fh)
+    trial_idx = cfg["trial_idx"]
+    tag_suffix = f"_{args.tag}" if args.tag else ""
+
+    hp_results_dir = os.path.join(RESULTS_DIR, "hp_results")
+    os.makedirs(hp_results_dir, exist_ok=True)
+    result_path = os.path.join(hp_results_dir, f"trial_{trial_idx:04d}.json")
+    if os.path.exists(result_path):
+        print(f"Trial {trial_idx} already done, skipping."); return
+
+    dataset_file = f"rnn_dataset_{args.mode}{tag_suffix}.pt"
+    print(f"=== GRU HP Trial {trial_idx} ===  {cfg}", flush=True)
+
+    data     = torch.load(dataset_file, weights_only=False)
+    X_train  = data["X_train"]; y_train = data["y_train"]
+    X_val    = data["X_val"];   y_val   = data["y_val"]
+    fids_val = data.get("file_ids_val", torch.arange(len(y_val)))
+    print(f"  Train: {X_train.shape}  Val: {X_val.shape}")
+
+    pos_weight = None
+    if args.mode == "full":
+        n_pos = int(y_train.sum()); n_neg = int((y_train == 0).sum())
+        pos_weight = torch.tensor([n_neg / n_pos], dtype=torch.float32)
+        print(f"  pos_weight={pos_weight.item():.2f}")
+
+    crit   = WeightedBCELoss(pos_weight)
+    model  = GRUBotDetector(INPUT_DIM, cfg["hidden_dim"], cfg["num_layers"],
+                             cfg["dropout"]).to(device)
+    opt    = optim.Adam(model.parameters(), lr=cfg["lr"])
+    ldr    = DataLoader(TensorDataset(X_train, y_train),
+                        batch_size=cfg["batch_size"], shuffle=True)
+    val_ld = DataLoader(TensorDataset(X_val, y_val), batch_size=1024)
+
+    t0 = _time.time()
+    for ep in range(30):
+        train_epoch(model, ldr, crit, opt)
+        if (ep + 1) % 10 == 0:
+            print(f"  epoch {ep+1}/30", flush=True)
+
+    model.eval()
+    probs = []
+    with torch.no_grad():
+        for Xb, _ in val_ld:
+            probs.extend(model(Xb.to(device)).cpu().numpy().flatten())
+    probs = np.array(probs)
+    y_np  = y_val.numpy().flatten()
+    fids  = fids_val.numpy()
+
+    fp, fl = {}, {}
+    for p, lbl, fid in zip(probs, y_np, fids):
+        fid = int(fid)
+        fp.setdefault(fid, []).append(float(p)); fl.setdefault(fid, int(lbl))
+    ftrue = [fl[fid] for fid in fp]
+    fpred = [1 if any(p >= cfg["threshold"] for p in fp[fid]) else 0 for fid in fp]
+    val_f1 = f1_score(ftrue, fpred, zero_division=0)
+
+    result = {"trial_idx": trial_idx, "config": cfg,
+              "val_file_f1": val_f1, "elapsed_s": round(_time.time() - t0, 1)}
+    with open(result_path, "w") as fh:
+        json.dump(result, fh, indent=2)
+    print(f"Trial {trial_idx}: val_file_F1={val_f1:.4f} ({result['elapsed_s']:.0f}s) -> {result_path}",
+          flush=True)
+
+
+def collect_mode(args):
+    import glob as _glob
+    tag_suffix = f"_{args.tag}" if args.tag else ""
+    hp_results_dir = os.path.join(RESULTS_DIR, "hp_results")
+    files = sorted(_glob.glob(os.path.join(hp_results_dir, "trial_*.json")))
+    if not files:
+        print(f"No trial results in {hp_results_dir}"); return
+
+    rows = []
+    for f in files:
+        with open(f) as fh:
+            rows.append(json.load(fh))
+    rows.sort(key=lambda r: r["val_file_f1"], reverse=True)
+
+    print(f"\n=== GRU HP search results ({len(rows)} completed trials) ===")
+    for r in rows[:15]:
+        c = r["config"]
+        print(f"  [{r['trial_idx']:04d}] val_f1={r['val_file_f1']:.4f}  "
+              f"hidden={c['hidden_dim']} layers={c['num_layers']} "
+              f"dr={c['dropout']:.2f} lr={c['lr']:.5f} "
+              f"bs={c['batch_size']} thr={c['threshold']:.2f}")
+
+    best_c = rows[0]["config"]
+    best_hps = {"hidden_dim": best_c["hidden_dim"], "num_layers": best_c["num_layers"],
+                "dropout": best_c["dropout"], "lr": best_c["lr"],
+                "batch_size": best_c["batch_size"], "threshold": best_c["threshold"]}
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    hp_path = os.path.join(RESULTS_DIR, f"gru_best_hps{tag_suffix}.json")
+    with open(hp_path, "w") as fh:
+        json.dump(best_hps, fh, indent=2)
+    print(f"\nBest trial {rows[0]['trial_idx']}: val_file_F1={rows[0]['val_file_f1']:.4f}")
+    print(f"Best HPs -> {hp_path}")
+
+
+# ==============================================================================
+# 8. THRESHOLD TUNING (no retraining)
 # ==============================================================================
 def tune_threshold_mode(args):
     tag_suffix   = f"_{args.tag}" if args.tag else ""
@@ -427,6 +531,10 @@ def main():
                         help="Load best HPs from a JSON file instead of searching or using defaults.")
     parser.add_argument("--tune-threshold", action="store_true",
                         help="Skip training; sweep val thresholds on saved model and report test results.")
+    parser.add_argument("--trial-config", default=None,
+                        help="Run one HP trial from a config JSON, save result to hp_results/.")
+    parser.add_argument("--collect", action="store_true",
+                        help="Collect trial results, save best HPs JSON (no training).")
     args = parser.parse_args()
 
     global DATASET_FILE, MODEL_SAVE_PATH
@@ -436,6 +544,12 @@ def main():
 
     if args.tune_threshold:
         tune_threshold_mode(args)
+        return
+    if args.trial_config:
+        run_trial_mode(args)
+        return
+    if args.collect:
+        collect_mode(args)
         return
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
