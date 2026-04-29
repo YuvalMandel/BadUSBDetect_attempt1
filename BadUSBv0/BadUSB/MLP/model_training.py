@@ -671,15 +671,15 @@ def main():
 
     print(f"\nTraining: hidden={hidden_dims}, dropout={dropout:.2f}, "
           f"lr={lr:.5f}, batch={batch_size}, epochs={EPOCHS}")
-    best_val_loss = float('inf')
+    best_val_f1 = 0.0
 
     for epoch in range(EPOCHS):
         tl, ta, tf = train_epoch(model, train_loader, criterion, optimizer)
         vl, va, vf = evaluate(model, val_loader, criterion)
         history['train_loss'].append(tl); history['train_acc'].append(ta)
         history['val_loss'].append(vl);   history['val_acc'].append(va)
-        if vl < best_val_loss:
-            best_val_loss = vl
+        if vf > best_val_f1:
+            best_val_f1 = vf
             torch.save(model.state_dict(), MODEL_SAVE_PATH)
         print(f"Epoch {epoch+1:02d}/{EPOCHS} | "
               f"Loss {tl:.4f} (Val {vl:.4f}) | "

@@ -34,7 +34,7 @@ python -X utf8 train_gru.py \
     --split-json "$WORK/data_split.json" \
     --mode full \
     --tag fullkey \
-    --hps-json "$WORK/results/GRU/gru_best_hps.json" \
+    --hps-json "$WORK/results/GRU/gru_best_hps_fullkey.json" \
     --tune-threshold
 
 echo "========================================"

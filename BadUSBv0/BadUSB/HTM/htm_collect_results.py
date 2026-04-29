@@ -29,12 +29,14 @@ _badusb_root = os.path.dirname(_here)
 RESULTS_DIR = os.path.join(_badusb_root, "results", "HTM", "results")
 LEADERBOARD_DIR = os.path.join(_badusb_root, "results", "HTM")
 
-def load_results() -> list:
+def load_results(tag: str = "") -> list:
     records = []
     for fpath in sorted(glob.glob(os.path.join(RESULTS_DIR, "htm_model_*.json"))):
         try:
             with open(fpath) as fh:
                 r = json.load(fh)
+            if tag and tag not in r.get("model_file", ""):
+                continue
             r["result_file"] = fpath
             records.append(r)
         except Exception as exc:
@@ -57,7 +59,7 @@ def format_row(rank: int, r: dict) -> str:
         f"lt={lt_str}"
     )
 
-def evaluate_best_on_test(best_record):
+def evaluate_best_on_test(best_record, args_tag=""):
     """Load the best-val model and evaluate it on val+test, plotting full confusion matrices."""
     if _here not in sys.path:
         sys.path.insert(0, _here)
@@ -68,7 +70,9 @@ def evaluate_best_on_test(best_record):
         print(f"  [test eval] Cannot import HTM modules: {e}"); return
 
     model_path       = best_record.get("model_file")
-    windows_cache    = os.path.join(_here, "windows_cache.pkl")
+    _tag = args_tag if args_tag else ""
+    _cache_name = f"windows_cache_{_tag}.pkl" if _tag else "windows_cache.pkl"
+    windows_cache    = os.path.join(_here, _cache_name)
     split_json       = os.path.join(_badusb_root, "data_split.json")
 
     for path, label in [(model_path, "model"), (windows_cache, "windows_cache"), (split_json, "data_split.json")]:
@@ -160,7 +164,8 @@ def evaluate_best_on_test(best_record):
         "test_win_f1": results["test"]["win_f1"],
         "thresh":      float(best_thresh),
     }
-    out = os.path.join(LEADERBOARD_DIR, "final_test_results.json")
+    _tag_suffix = f"_{args_tag}" if args_tag else ""
+    out = os.path.join(LEADERBOARD_DIR, f"final_test_results{_tag_suffix}.json")
     with open(out, 'w') as fh: json.dump(final, fh, indent=2)
     print(f"  Final results JSON -> {out}")
 
@@ -168,9 +173,10 @@ def evaluate_best_on_test(best_record):
 def main():
     parser = argparse.ArgumentParser(description="Collect HTM hyperparameter search results")
     parser.add_argument("--top", type=int, default=20, help="Number of top configs to display")
+    parser.add_argument("--tag", type=str, default="", help="Filter to results whose model_file contains this tag (e.g. 'fullkey')")
     args = parser.parse_args()
 
-    records = load_results()
+    records = load_results(tag=args.tag)
     if not records:
         print(f"No results found in {RESULTS_DIR}/. Run training jobs first.")
         sys.exit(0)
@@ -186,7 +192,8 @@ def main():
     header = (f"{'Rank':>4}  {'Config':>9}  {'ValBAcc':>7}  "
               f"{'Val File-F1/Win-F1':>22}  "
               f"{'Thresh':>7}  {'LiveThresh':>10}")
-    lines = ["=" * 80, f"HTM Hyperparameter Search -- {total} completed runs", "=" * 80, header, "-" * 80]
+    tag_label = f" [{args.tag}]" if args.tag else ""
+    lines = ["=" * 80, f"HTM Hyperparameter Search{tag_label} -- {total} completed runs", "=" * 80, header, "-" * 80]
 
     for rank, r in enumerate(records[:show], 1):
         lines.append(format_row(rank, r))
@@ -205,12 +212,13 @@ def main():
     print(report)
 
     os.makedirs(LEADERBOARD_DIR, exist_ok=True)
-    txt_path = os.path.join(LEADERBOARD_DIR, "leaderboard.txt")
+    tag_suffix = f"_{args.tag}" if args.tag else ""
+    txt_path = os.path.join(LEADERBOARD_DIR, f"leaderboard{tag_suffix}.txt")
     with open(txt_path, 'w') as fh:
         fh.write(report + "\n")
     print(f"\nText report -> {txt_path}")
 
-    csv_path = os.path.join(LEADERBOARD_DIR, "leaderboard.csv")
+    csv_path = os.path.join(LEADERBOARD_DIR, f"leaderboard{tag_suffix}.csv")
     all_cfg_keys = sorted(list(set(k for r in records for k in r.get("config", {}).keys())))
     fieldnames = ["rank", "config_idx", "val_bacc", "val_f1", "val_win_f1", "best_thresh", "live_thresh"] + all_cfg_keys
     
@@ -223,7 +231,7 @@ def main():
             writer.writerow(row)
     print(f"CSV report  -> {csv_path}")
 
-    evaluate_best_on_test(records[0])
+    evaluate_best_on_test(records[0], args_tag=args.tag)
 
 if __name__ == "__main__":
     main()

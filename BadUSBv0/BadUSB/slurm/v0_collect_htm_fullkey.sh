@@ -1,15 +1,14 @@
 #!/bin/bash
 # ============================================================
-# SLURM job: MLP — threshold sweep on saved fullkey model
-#   cd BadUSBv0/BadUSB && sbatch slurm/v0_tunethresh_mlp.sh
+# SLURM job: Collect HTM fullkey results + test eval on best
+#   cd BadUSBv0/BadUSB && sbatch slurm/v0_collect_htm_fullkey.sh
 # ============================================================
-#SBATCH --job-name=v0_mlp_tune
-#SBATCH --output=logs/v0_mlp_tune_%j.out
-#SBATCH --error=logs/v0_mlp_tune_%j.err
-#SBATCH --cpus-per-task=4
+#SBATCH --job-name=v0_htm_collect_fk
+#SBATCH --output=logs/v0_htm_collect_fk_%j.out
+#SBATCH --error=logs/v0_htm_collect_fk_%j.err
+#SBATCH --cpus-per-task=2
 #SBATCH --mem=16G
-#SBATCH --time=1:00:00
-#SBATCH --gres=gpu:1
+#SBATCH --time=00:30:00
 
 set -e
 
@@ -24,18 +23,13 @@ WORK="$SLURM_SUBMIT_DIR"
 echo "========================================"
 echo "Job   : $SLURM_JOB_ID"
 echo "Node  : $(hostname)"
-echo "Task  : MLP threshold sweep (mode=full, tag=fullkey)"
+echo "Task  : HTM fullkey collect + test eval (cfg_0449)"
+echo "WORK  : $WORK"
 echo "Start : $(date)"
 echo "========================================"
 
-cd "$WORK/MLP"
-
-python -X utf8 model_training.py \
-    --split-json "$WORK/data_split.json" \
-    --mode full \
-    --tag fullkey \
-    --hps-json "$WORK/results/MLP/mlp_best_hps_fullkey.json" \
-    --tune-threshold
+cd "$WORK"
+python -X utf8 HTM/htm_collect_results.py --tag fullkey --top 20
 
 echo "========================================"
 echo "End : $(date)"
